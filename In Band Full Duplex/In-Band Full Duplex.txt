@@ -1,0 +1,1068 @@
+%% SIMULATION PARAMETERS
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+nLoops = 20; %# of Simulations to Run
+outputData = zeros(nLoops,30); 
+outputData2 = zeros(nLoops,14);
+for loop = 1:nLoops
+	GDType = 1;
+	ASCCoeff =  [0,0,0,0];
+	if loop<51  %Sets # Runs Excluding Noise 
+    	DACCoeff = [1,0,0];
+%Coefficient Matrix for DAC RF Mixing
+    	IQCoeff = [1,0,0];
+%Coefficient Matrix for I/Q with OSC Mixing
+    	QAMCoeff = [1,0,0];
+%Coefficient Matrix for QAM(I+Q) Mixing
+    	PACoeff = [1,0,0,0];
+	else      	
+    	DACCoeff = [1,rand(),rand()];
+%Coefficient Matrix for DAC RF Mixing
+    	IQCoeff = [1,rand(),rand()];
+%Coefficient Matrix for I/Q with OSC Mixing
+    	QAMCoeff = [1,rand(),rand()];
+%Coefficient Matrix for QAM(I+Q) Mixing
+    	PACoeff = [1,rand(),rand(),rand()];
+    	%ASCCoeff =  [rand(),rand(),rand(),rand()]/10;
+	end
+	%%Thermal Noise Parameters
+	R = 50;             	%System Characteristic Impedance
+	kB = 1.380649*10^-23;   %Boltzmann Constant (J/K)
+	T = 298.15;         	%System Temperature (Kelvin); 25C = 77F = 298.15K
+	df = 1;             	%Noise/Measurement BW (Hz)
+	%%Self-Interference Parameters
+	nBranches = 4;%randi([4 50]);  %# ASC branches/taps Randomized Unf. Dist.
+	nPath = 30;%randi([4 50]); 	%# SI Paths - Randomized Unf. Dist.
+	modelBeta = rand(1,nBranches)/10; %Initial SIC Gain Weights
+	modelPhase = rand(1,nBranches);   %Initial Phase Weights
+	%%Training Parameters
+	%GDType = 1;  	%SGD = 1, BGD=2
+	%batchSize = 10;    	%Mini Batch Size (BGD Only)
+	passBW = 100;       	%Baseband Bandwidth
+	nTrain = 5000; 	%# of Training Samples
+	eta = 0.01;         	%Learning Rate
+	v = [1 10 100 500 1000];
+	convergence = v(randi(length(v))) / 1000000;
+	%%DAC/ADC Parameters
+	bADC = 8;           	%ADC Bits
+	bDAC = 8;           	%DAC Bits
+	vref = 1;           	%DAC/ADC Reference Voltage
+	vdrop = 0.3;        	%DAC/ADC Internal Voltage Drop
+	NSD = -162;         	%DAC Noise Spectral Density
+	fCLK = 2*passBW;    	%Symbol output Rate (MHz)
+	clkIso = -60;       	%Set Clock Isolation from Output (dB)
+	%%Oscillator & Filtration Parameters
+	fLO = 2400;         	%Oscillator Frequency (MHz)
+	Fs = 10*fLO;        	%Sampling Frequency (MHz)
+	fmin = fLO-passBW;  	%Minimum frequency to filter (MHz)
+	fmax = fLO+passBW;  	%Maximum frequency to filter (MHz)
+	posc = 8;           	%Oscillator power (dBm)
+	pnVar = 2.1;     	%Norm Rand Dist Sigma (dBc)
+	%%Noise Figures
+	NF_Mix = 4.4;       	%Noise Figure
+	NF_PA = 3.4;        	%Power Amplifier NF
+	Av = 1;             	%Power Amplifier Gain, Max = 5.62
+	%%Sequence  Parameters
+	nsamples = 11000;   	%DAC Rendered #Samples
+	testTime = [0:1/fCLK:1/fCLK*(nsamples-1)]; 	%Time Array of Simulation
+	testSeq = false;    	%True = Test Sequence Input, False = PRBS Input
+	%% JOHNSON-NYQUIST (THERMAL) NOISE 
+	%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+	%Calculate thermal noise for at given bandwidth % system temperature
+	vThermal = sqrt(4*kB*R*T*df); %Thermal Voltage with df measurement window
+	%% GENERATE # OF SI PATHS, LOSS, & PHASE SHIFT
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+	pathLoss = zeros(1, nPath);
+	pathLoss(1,1) = rand(1)/4;          	%Initial path loss U(0,0.25)
+	pathPhase = rand([1,nPath])*2*pi;   	%Path Phase Shift U(0,2*pi)
+	%Path Attenuations - Derived from Randomized Uniform Distribution where
+	%Sum of all SI paths is < 0.5
+	pathSum=0;       	
+	for p = 2:nPath
+    	pathSum = pathSum + pathLoss(1,p-1);
+    	pathLoss(1, p) = (0.5-pathSum)*rand()/2;
+	end
+	%Ensures largest delay is associated with largest loss.
+	pathLoss = sort(pathLoss, 'descend');
+	pathPhase = sort(pathPhase, 'ascend');
+	%% GENERATE I & Q BITSTREAMS
+	%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+	if testSeq
+    	%TEST SEQUENCE PATTERN
+    	testI = 1*cos(2*pi*1.*testTime)+1; 	
+    	testQ = 1*cos(2*pi*1.*testTime)+1; 	
+    	streamI = ADC(testI, 1/(2*bADC), vref, vdrop, bADC, 0, 0, 0, 0); 
+    	streamQ = ADC(testQ, 1/(2*bADC), vref, vdrop, bADC, 0, 0, 0, 0);
+	else
+    	%PRBS SEQUENCE PATTERN
+    	streamI = 2 * randi([0 1], 1, nsamples*bDAC) - 1;
+    	streamQ = 2 * randi([0 1], 1, nsamples*bDAC) - 1;
+	end
+	%% DAC
+	%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+	Idac = DAC(streamI(1,:), fCLK, vref, vdrop, bDAC, 0.001);
+	Qdac = DAC(streamQ(1,:), fCLK, vref, vdrop, bDAC, 0.001);
+	%IMD & SFDR Incorporation
+	sqr = ones(size(Idac(1,:)))*10^(clkIso/20);   %Clock rising edge
+	DAC_clk = [sqr;sqr;Idac(3,:);Idac(4,:)];            %Required format
+	IdacTemp = RF_Mixer(DAC_clk, Idac, DACCoeff, -1, -1);  
+	QdacTemp = RF_Mixer(DAC_clk, Qdac, DACCoeff, -1, -1);  
+  	%NSD Incorporation 
+	Qdac(2,:) = addAWGN(QdacTemp(2,:), abs(10*log10(10^(NSD/10)/((vref - vdrop)^2/R))));
+	ttl_time = Idac(3,size(Idac,2)); %Total time of symbols (usecs)
+	%% OSCILLATOR
+	%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+   	osc = OSCILLATOR(fLO, Fs, ttl_time, R, posc, pnVar);
+	%% SYNCHRONIZER
+	%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+	%Sample-&- Hold Circuit Synchronizes to match oscillators timing
+	%Necessary as all signals are treated as discrete time events
+	Isynch = Synchronizer(Idac, osc);
+	Qsynch = Synchronizer(Qdac, osc);
+	%% IQ MIXER
+	%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+	%Ideal Mixing = x[n]*cos(wLO*t)
+	%   x[n] freq = [wLow, wHigh]
+	%   LO freq = wLO
+	%Ideal IQ mixer freq components:
+	%   band1 <= f <= band2
+	%   	wLO-wHigh <= band1 <= wLO-wLow
+	%   	wLO+wLow <= band2 <= wLO+wHigh
+	Imix = IQ_Mixer(Isynch, osc, 0, IQCoeff, NF_Mix);   %Mixes I with LO Cos
+	Qmix = IQ_Mixer(Qsynch, osc, 90, IQCoeff, NF_Mix);  %Mixes Q with LO Sin
+	%Filter for upconverted frequency spectrum
+	Iflt = BPF(Imix,'fir', Fs, fmin, fmax, 0.9, 60);
+	Qflt = BPF(Qmix,'fir', Fs, fmin, fmax, 0.9, 60); 
+ 	 %% QAM MIXER
+	%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+	QAMunf = RF_Mixer(Iflt, Qflt, QAMCoeff,-1,-1);
+	%% POWER AMPLIFIER
+	%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+	QAM_PA = PA(QAMunf, Av, PACoeff, NF_PA);
+	%Filter from fLO-BW/2 to fLO+BW/2
+	QAM = BPF(QAMunf,'fir', Fs, fmin, fmax, 0.9, 60);
+	%% NOISE FIGURE & THERMAL VOLTAGE 
+	%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+	vTout = sqrt(10^(NF_Mix/10)*10^(NF_PA/10)*10^(NF_Mix/10)*vThermal^2);
+	vTx = sqrt(mean(QAM(1,:).^2));
+	snrOut = 10*log10(vTx/vTout); 
+	QAM(2,:) = addAWGN(QAM(2,:),snrOut);
+      %% SNR, Tx, IMD PWR CALCULATION
+	%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+	[pwrTx, pwrIMD, SNRTx] = SNRCalc(QAM(2,:), Fs);
+     	%Extract QAM Symbols for Training 
+	trainTx = QAM(2,200:200+nTrain);
+	trainTime = QAM(3,200:200+nTrain);
+  	%Extract Remaining QAM Symbols for Transmission
+	QAMTx = [QAM(1,nTrain+1:length(QAM(1,:)));...
+    	QAM(2,nTrain+1:length(QAM(2,:)));...
+    	QAM(3,nTrain+1:length(QAM(3,:)));...
+    	QAM(4,nTrain+1:length(QAM(4,:)))];
+	%% GENERATE SELF-INTERFERENCE SIGNALS
+	%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+	hnTrain = imag(hilbert(trainTx));   	%Training Hilbert Transform
+	hnReceive = imag(hilbert(QAMTx(2,:)));  %Transmission Hilbert Transform
+	trainPath = zeros([nPath,length(trainTx)]);
+	receivePath = zeros([nPath,length(QAMTx(2,:))]);
+	for p = 1:nPath
+        	trainPath(p,:) = pathLoss(p)*( trainTx*cos(pathPhase(p))- hnTrain*sin(pathPhase(p)) );
+        	receivePath(p,:) = pathLoss(p)*( QAMTx(2,:)*cos(pathPhase(p))- hnReceive*sin(pathPhase(p)) );
+	end
+	trainSI = sum(trainPath);   	%Training Through Actual SI Channel
+	actualSI = sum(receivePath);	%Transmitted Through Actual SI Channel
+	%% ASC ML TRAINING
+	%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+	trainTx = ASCNL(trainTx,ASCCoeff);
+	if GDType == 1
+    	[modelBeta, modelPhase, MSE, epochs] = MLSGD(trainTx, trainSI,  trainTime, eta, convergence, modelBeta, modelPhase);
+	elseif GDType == 2
+    	batchSize = 10;
+    	[modelBeta, modelPhase, MSE, epochs] = MLBGD(trainTx, trainSI,  trainTime, eta, batchSize, convergence, modelBeta, modelPhase);
+	end
+ 	%% ASC SI ESTIMATION
+	%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+	SI_model = zeros([4,length(QAMTx(2,:))]);
+	for p = 1:nBranches
+        	SI_model(p,:) = modelBeta(p)*( QAMTx(2,:)*cos(modelPhase(p))- hnReceive*sin(modelPhase(p)) );
+	end
+	modelSI = sum(SI_model);	%Modeled SI through ASC
+	modelSI = ASCNL(modelSI,ASCCoeff);
+	%% MEASUREMENTS/CALCULATIONS
+	%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+	[pwrSI, pwrSIIMD, SNRTx3] = SNRCalc(actualSI, Fs);
+	[pwrASC, pwrASCNL, SNRTx2] = SNRCalc(modelSI, Fs);
+	SIC = abs((actualSI-modelSI)./actualSI);
+	SICdB = movmean(20*log10(SIC),nTrain);
+	SICavg = mean(SICdB);
+     %% RECORD RUN DATA
+	%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+	outputData(loop,:) = [nPath, nBranches, GDType, length(QAM(2,:)), nTrain,  convergence*100, epochs, MSE(1), MSE(2), SICavg, pwrTx, pwrIMD, SNRTx,  DACCoeff, IQCoeff, QAMCoeff, PACoeff, ASCCoeff];
+	outputData2(loop,:) = [nPath, nBranches, GDType, length(QAM(2,:)),  nTrain, convergence*100, epochs, SICavg, MSE(2), pwrTx,  pwrIMD,pwrSI,pwrSIIMD, pwrASCNL];
+end
+%%  WRITE DATA TO FILE
+%%%%%%%%%%%%%%%%%%%%%%
+%fileID = 'SimData.xlsx';
+%writematrix(outputData,fileID,'WriteMode','append');
+fileID = 'ASCNLData.xlsx';
+writematrix(outputData2,fileID,'WriteMode','append');
+%% DISPLAY RESULTS AND PLOTS - ENHANCED VERSION
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+ fprintf('\n');
+fprintf('????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????\n');
+fprintf('?                                                              IN-BAND FULL-DUPLEX COMMUNICATION SYSTEM - SIMULATION RESULTS                                                                       ?\n');
+fprintf('????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????\n');
+% Clean data from NaN and Inf values
+outputData2_clean = outputData2;
+outputData2_clean(isnan(outputData2_clean)) = 0;
+outputData2_clean(isinf(outputData2_clean)) = 0;
+% Display comprehensive summary statistics
+fprintf('\n=== SYSTEM PERFORMANCE SUMMARY ===\n');
+fprintf('Simulation Configuration:\n');
+fprintf('  • Number of simulation loops: %d\n', nLoops);
+fprintf('  • Number of SI paths: %d\n', nPath);
+fprintf('  • Number of ASC branches: %d\n', nBranches);
+fprintf('  • Training samples: %d\n', nTrain);
+fprintf('  • Learning rate (?): %.4f\n', eta);
+fprintf('\nPerformance Metrics (Average):\n');
+fprintf('  • Self-Interference Cancellation: %.2f dB\n', mean(outputData2_clean(:,8)));
+fprintf('  • Final Mean Square Error: %.6f\n', mean(outputData2_clean(:,9)));
+fprintf('  • Training epochs required: %.1f\n', mean(outputData2_clean(:,7)));
+fprintf('  • Transmit Power: %.2f dBm\n', mean(outputData2_clean(:,10)));
+fprintf('  • IMD Power: %.2f dBm\n', mean(outputData2_clean(:,11)));
+fprintf('  • SI Power: %.2f dBm\n', mean(outputData2_clean(:,12)));
+fprintf('  • SIIMD Power: %.2f dBm\n', mean(outputData2_clean(:,13)));
+ 
+% Calculate and display improvement metrics
+SIC_improvement = mean(outputData2_clean(:,8)); % SIC in dB
+SNR_improvement = mean(outputData2_clean(:,10)) - mean(outputData2_clean(:,11)); % Tx Power - IMD Power
+ fprintf('\nImprovement Analysis:\n');
+fprintf('  • SIC Achievement: %.2f dB\n', SIC_improvement);
+fprintf('  • SNR Improvement: %.2f dB\n', SNR_improvement);
+fprintf('  • Convergence Speed: %.1f epochs average\n', mean(outputData2_clean(:,7)));
+% Display last loop detailed results
+fprintf('\n=== DETAILED LAST LOOP RESULTS ===\n');
+fprintf('Path Configuration:\n');
+fprintf('  • Number of Paths: %d\n', outputData2_clean(end,1));
+fprintf('  • Number of Branches: %d\n', outputData2_clean(end,2));
+fprintf('  • GD Type: %s\n', string(outputData2_clean(end,3)));
+fprintf('  • Training Samples: %d\n', outputData2_clean(end,5));
+fprintf('  • Convergence Threshold: %.6f\n', outputData2_clean(end,6));
+fprintf('\nTraining Performance:\n');
+fprintf('  • Epochs: %d\n', outputData2_clean(end,7));
+fprintf('  • Final SIC: %.2f dB\n', outputData2_clean(end,8));
+fprintf('  • Final MSE: %.6f\n', outputData2_clean(end,9));
+fprintf('\nPower Analysis:\n');
+fprintf('  • Tx Power: %.2f dBm\n', outputData2_clean(end,10));
+fprintf('  • IMD Power: %.2f dBm\n', outputData2_clean(end,11));
+fprintf('  • SI Power: %.2f dBm\n', outputData2_clean(end,12));
+fprintf('  • SIIMD Power: %.2f dBm\n', outputData2_clean(end,13));
+fprintf('  • ASC NL Power: %.2f dBm\n', outputData2_clean(end,14));
+ %% COMPREHENSIVE PLOTTING SECTION
+ % Figure 1: Main Performance Metrics
+figure('Position', [100, 100, 1400, 900], 'Name', 'IBFD System Performance Overview');
+% Subplot 1: SIC Performance
+subplot(2,3,1);
+valid_sic = outputData2_clean(:,8);
+valid_sic(valid_sic == 0) = []; % Remove zeros if any
+if ~isempty(valid_sic)
+	plot(1:length(valid_sic), valid_sic, 'b-o', 'LineWidth', 2, 'MarkerSize', 4);
+	title('Self-Interference Cancellation Performance', 'FontSize', 12, 'FontWeight', 'bold');
+	xlabel('Simulation Loop');
+	ylabel('SIC (dB)');
+	grid on;
+	% Add average line
+	hold on;
+	yline(mean(valid_sic), 'r--', 'LineWidth', 2, 'Label', sprintf('Avg: %.1f dB', mean(valid_sic)));
+	legend('SIC Performance', 'Average', 'Location', 'southeast');
+else
+	text(0.5, 0.5, 'No valid SIC data', 'HorizontalAlignment', 'center', 'FontSize', 12);
+	title('Self-Interference Cancellation Performance', 'FontSize', 12, 'FontWeight', 'bold');
+end
+ % Subplot 2: MSE Convergence
+subplot(2,3,2);
+valid_mse = outputData2_clean(:,9);
+valid_mse(valid_mse == 0) = []; % Remove zeros if any
+if ~isempty(valid_mse) && all(valid_mse > 0)
+	semilogy(1:length(valid_mse), valid_mse, 'r-s', 'LineWidth', 2, 'MarkerSize', 4);
+	title('Mean Square Error Convergence', 'FontSize', 12, 'FontWeight', 'bold');
+	xlabel('Simulation Loop');
+	ylabel('MSE (log scale)');
+	grid on;
+else
+	plot(1:length(valid_mse), valid_mse, 'r-s', 'LineWidth', 2, 'MarkerSize', 4);
+	title('Mean Square Error Convergence', 'FontSize', 12, 'FontWeight', 'bold');
+	xlabel('Simulation Loop');
+	ylabel('MSE');
+	grid on;
+end
+ % Subplot 3: Power Levels Comparison
+subplot(2,3,3);
+if nLoops > 0
+	plot(1:nLoops, outputData2_clean(:,10), 'g-^', 'LineWidth', 2, 'MarkerSize', 4, 'DisplayName', 'Tx Power');
+	hold on;
+	plot(1:nLoops, outputData2_clean(:,11), 'm-v', 'LineWidth', 2, 'MarkerSize', 4, 'DisplayName', 'IMD Power');
+	plot(1:nLoops, outputData2_clean(:,12), 'c-*', 'LineWidth', 2, 'MarkerSize', 4, 'DisplayName', 'SI Power');
+	plot(1:nLoops, outputData2_clean(:,13), 'k-d', 'LineWidth', 1, 'MarkerSize', 3, 'DisplayName', 'SIIMD Power');
+	title('Power Levels Analysis', 'FontSize', 12, 'FontWeight', 'bold');
+	xlabel('Simulation Loop');
+	ylabel('Power (dBm)');
+	legend('Location', 'best');
+	grid on;
+else
+	text(0.5, 0.5, 'No power data available', 'HorizontalAlignment', 'center', 'FontSize', 12);
+	title('Power Levels Analysis', 'FontSize', 12, 'FontWeight', 'bold');
+end
+ % Subplot 4: Training Efficiency
+subplot(2,3,4);
+valid_epochs = outputData2_clean(:,7);
+if ~isempty(valid_epochs)
+	plot(1:length(valid_epochs), valid_epochs, 'k-d', 'LineWidth', 2, 'MarkerSize', 4);
+	title('Training Efficiency - Epochs Required', 'FontSize', 12, 'FontWeight', 'bold');
+	xlabel('Simulation Loop');
+	ylabel('Training Epochs');
+	grid on;
+	% Add average line
+	hold on;
+	yline(mean(valid_epochs), 'r--', 'LineWidth', 2, 'Label', sprintf('Avg: %.1f', mean(valid_epochs)));
+else
+	text(0.5, 0.5, 'No training data available', 'HorizontalAlignment', 'center', 'FontSize', 12);
+	title('Training Efficiency - Epochs Required', 'FontSize', 12, 'FontWeight', 'bold');
+end
+% Subplot 5: Performance Distribution
+subplot(2,3,5);
+valid_sic_hist = outputData2_clean(:,8);
+valid_sic_hist(valid_sic_hist == 0) = []; % Remove zeros
+if ~isempty(valid_sic_hist)
+	histogram(valid_sic_hist, 15, 'FaceColor', 'blue', 'FaceAlpha', 0.7);
+	title('SIC Performance Distribution', 'FontSize', 12, 'FontWeight', 'bold');
+	xlabel('SIC (dB)');
+	ylabel('Frequency');
+	grid on;
+	% Add statistics
+	mean_sic = mean(valid_sic_hist);
+	std_sic = std(valid_sic_hist);
+	if ~isnan(mean_sic) && ~isnan(std_sic)
+    	text(0.6*max(xlim), 0.8*max(ylim), ...
+         	sprintf('Mean: %.2f dB\nStd: %.2f dB', mean_sic, std_sic), ...
+         	'FontSize', 10, 'BackgroundColor', 'white');
+	end
+else
+	text(0.5, 0.5, 'No SIC data for histogram', 'HorizontalAlignment', 'center', 'FontSize', 12);
+	title('SIC Performance Distribution', 'FontSize', 12, 'FontWeight', 'bold');
+end
+sgtitle('In-Band Full-Duplex System - Comprehensive Performance Analysis', 'FontSize', 14, 'FontWeight', 'bold');
+%% Figure 2: Comparative Analysis
+figure('Position', [100, 100, 1200, 800], 'Name', 'Comparative Performance Analysis');
+% Before-After SIC Comparison (simulated)
+sic_improvement = outputData2_clean(:,8); % Actual SIC achieved
+snr_before = outputData2_clean(:,10) - outputData2_clean(:,12); % Tx - SI (worst case)
+snr_after = outputData2_clean(:,10) - outputData2_clean(:,11);  % Tx - IMD (after SIC)
+ 
+% Clean SNR data
+snr_before(isinf(snr_before) | isnan(snr_before)) = 0;
+snr_after(isinf(snr_after) | isnan(snr_after)) = 0;
+subplot(2,2,1);
+if any(snr_before) || any(snr_after)
+	bar([mean(snr_before(snr_before~=0)), mean(snr_after(snr_after~=0))]);
+	set(gca, 'XTickLabel', {'Before SIC', 'After SIC'});
+	ylabel('SNR (dB)');
+	title('SNR Improvement with SIC', 'FontSize', 12, 'FontWeight', 'bold');
+	grid on;
+	% Add value labels
+	if mean(snr_before(snr_before~=0)) > 0
+    	text(1, mean(snr_before(snr_before~=0)), sprintf('%.1f dB', mean(snr_before(snr_before~=0))), ...
+         	'HorizontalAlignment', 'center', 'VerticalAlignment', 'bottom', 'FontWeight', 'bold');
+	end
+	if mean(snr_after(snr_after~=0)) > 0
+    	text(2, mean(snr_after(snr_after~=0)), sprintf('%.1f dB', mean(snr_after(snr_after~=0))), ...
+         	'HorizontalAlignment', 'center', 'VerticalAlignment', 'bottom', 'FontWeight', 'bold');
+	end
+else
+	text(0.5, 0.5, 'No SNR data available', 'HorizontalAlignment', 'center', 'FontSize', 12);
+	title('SNR Improvement with SIC', 'FontSize', 12, 'FontWeight', 'bold');
+end
+% SIC Effectiveness by Loop
+subplot(2,2,2);
+if nLoops > 1
+	yyaxis left;
+	plot(1:nLoops, sic_improvement, 'b-o', 'LineWidth', 2);
+	ylabel('SIC (dB)');
+	yyaxis right;
+	snr_improvement_data = snr_after - snr_before;
+    snr_improvement_data(isinf(snr_improvement_data) | isnan(snr_improvement_data)) = 0;
+	plot(1:nLoops, snr_improvement_data, 'r-s', 'LineWidth', 2);
+	ylabel('SNR Improvement (dB)');
+	title('SIC Effectiveness Over Loops', 'FontSize', 12, 'FontWeight', 'bold');
+	xlabel('Simulation Loop');
+	grid on;
+	legend('SIC Performance', 'SNR Improvement', 'Location', 'best');
+else
+	text(0.5, 0.5, 'Insufficient loops for analysis', 'HorizontalAlignment', 'center', 'FontSize', 12);
+	title('SIC Effectiveness Over Loops', 'FontSize', 12, 'FontWeight', 'bold');
+end
+% Training Convergence Analysis
+subplot(2,2,3);
+if nLoops > 0
+	plot(1:nLoops, outputData2_clean(:,7), 'm-^', 'LineWidth', 2);
+	hold on;
+	scaled_mse = outputData2_clean(:,9) * 10000; % Scaled for visibility
+	scaled_mse(isinf(scaled_mse) | isnan(scaled_mse)) = 0;
+	plot(1:nLoops, scaled_mse, 'g-s', 'LineWidth', 2);
+	title('Training Convergence Analysis', 'FontSize', 12, 'FontWeight', 'bold');
+	xlabel('Simulation Loop');
+	yyaxis left;
+	ylabel('Training Epochs');
+	yyaxis right;
+	ylabel('MSE × 10^4');
+	legend('Training Epochs', 'Final MSE (scaled)', 'Location', 'best');
+	grid on;
+else
+	text(0.5, 0.5, 'No training data available', 'HorizontalAlignment', 'center', 'FontSize', 12);
+	title('Training Convergence Analysis', 'FontSize', 12, 'FontWeight', 'bold');
+end
+ 
+% Performance Correlation Matrix
+subplot(2,2,4);
+if nLoops > 3
+	performance_metrics = [outputData2_clean(:,7), outputData2_clean(:,8), outputData2_clean(:,9), outputData2_clean(:,10)];
+	% Remove any rows with NaN or Inf
+    performance_metrics(any(isnan(performance_metrics) | isinf(performance_metrics), 2), :) = [];
+	if size(performance_metrics, 1) > 2
+    	corr_matrix = corr(performance_metrics);
+    	imagesc(corr_matrix);
+    	colorbar;
+    	metric_names = {'Epochs', 'SIC', 'MSE', 'Tx Power'};
+    	set(gca, 'XTick', 1:size(corr_matrix,2), 'YTick', 1:size(corr_matrix,1), ...
+             	'XTickLabel', metric_names(1:size(corr_matrix,2)), ...
+             	'YTickLabel', metric_names(1:size(corr_matrix,1)));
+    	title('Performance Metrics Correlation', 'FontSize', 12, 'FontWeight', 'bold');
+    	% Add correlation values
+    	for i = 1:size(corr_matrix,1)
+        	for j = 1:size(corr_matrix,2)
+            	if ~isnan(corr_matrix(i,j))
+                	text(j, i, sprintf('%.2f', corr_matrix(i,j)), ...
+                     	'HorizontalAlignment', 'center', 'FontWeight', 'bold', 'Color', 'white');
+            	end
+        	end
+    	end
+	else
+    	text(0.5, 0.5, 'Insufficient data for correlation', 'HorizontalAlignment', 'center', 'FontSize', 12);
+    	title('Performance Metrics Correlation', 'FontSize', 12, 'FontWeight', 'bold');
+	end
+else
+	text(0.5, 0.5, 'Need more loops for correlation', 'HorizontalAlignment', 'center', 'FontSize', 12);
+	title('Performance Metrics Correlation', 'FontSize', 12, 'FontWeight', 'bold');
+end
+ sgtitle('Comparative Performance Analysis - IBFD System', 'FontSize', 14, 'FontWeight', 'bold');
+ %% FINAL SUMMARY AND RECOMMENDATIONS
+fprintf('\n=== COMPREHENSIVE PERFORMANCE ANALYSIS ===\n');
+fprintf('Performance Category    	| Success Rate | Average Value | Best Case | Worst Case\n');
+fprintf('---------------------------|--------------|---------------|-----------|-----------\n');
+ % Calculate success rates safely
+sic_success = sum(outputData2_clean(:,8) > 20) / nLoops * 100;
+epoch_success = sum(outputData2_clean(:,7) < 50) / nLoops * 100;
+mse_success = sum(outputData2_clean(:,9) < 0.001) / nLoops * 100;
+snr_success = sum(snr_after > 15) / nLoops * 100;
+ 
+fprintf('SIC > 20 dB            	| %5.1f%%   	| %6.2f dB 	| %6.2f dB | %6.2f dB\n', ...
+    	sic_success, mean(outputData2_clean(:,8)), max(outputData2_clean(:,8)), min(outputData2_clean(:,8)));
+fprintf('Fast Convergence (<50 ep)  | %5.1f%%   	| %6.1f epochs | %6.0f ep   | %6.0f ep\n', ...
+    	epoch_success, mean(outputData2_clean(:,7)), min(outputData2_clean(:,7)), max(outputData2_clean(:,7)));
+fprintf('Low MSE (<0.001)       	| %5.1f%%   	| %8.6f	| %8.6f | %8.6f\n', ...
+    	mse_success, mean(outputData2_clean(:,9)), min(outputData2_clean(:,9)), max(outputData2_clean(:,9)));
+fprintf('High SNR (>15 dB)      	| %5.1f%%   	| %6.2f dB 	| %6.2f dB | %6.2f dB\n', ...
+    	snr_success, mean(snr_after(snr_after~=0)), max(snr_after), min(snr_after(snr_after~=0 & snr_after>0)));
+fprintf('\n=== SYSTEM PERFORMANCE ASSESSMENT ===\n');
+% Calculate overall score safely
+if ~isempty(outputData2_clean)
+	sic_component = min(mean(outputData2_clean(:,8)) / 50, 1);
+	epoch_component = min(1 - mean(outputData2_clean(:,7)) / 200, 1);
+	mse_component = min(1 - mean(outputData2_clean(:,9)), 1);
+	snr_component = min(mean(snr_after(snr_after~=0)) / 30, 1);
+	overall_score = (sic_component + epoch_component + mse_component + snr_component) / 4 * 100;
+else
+	overall_score = 0;
+end
+ fprintf('Overall System Performance Score: %.1f/100\n', overall_score);
+ if overall_score >= 80
+	fprintf('? EXCELLENT: System meets all performance criteria for IBFD operation\n');
+	fprintf('? Recommendation: Ready for real-world deployment\n');
+elseif overall_score >= 60
+	fprintf('? GOOD: System performs well with minor optimizations needed\n');
+	fprintf('? Recommendation: Optimize training parameters for better convergence\n');
+elseif overall_score >= 40
+	fprintf('? FAIR: System functional but requires significant improvements\n');
+	fprintf('? Recommendation: Review ASC architecture and training algorithm\n');
+else
+	fprintf('? NEEDS IMPROVEMENT: System performance below expectations\n');
+	fprintf('? Recommendation: Fundamental redesign of SIC approach needed\n');
+end
+ % Check if Excel file was created
+if exist('ASCNLData.xlsx', 'file')
+	fprintf('\n? Data successfully saved to: ASCNLData.xlsx\n');
+else
+	fprintf('\n? Warning: Excel file was not created!\n');
+end
+fprintf('\n????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????\n');
+fprintf('?                                                              SIMULATION COMPLETED SUCCESSFULLY                                                                                                  ?\n');
+fprintf('????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????\n');
+%% Additional Utility: Export results to MAT file for further analysis
+save('IBFD_Simulation_Results.mat', 'outputData', 'outputData2', 'nLoops', 'nPath', 'nBranches');
+fprintf('? Complete simulation data saved to: IBFD_Simulation_Results.mat\n');
+% ============ LOCAL FUNCTIONS ============
+ %Input sequence assumed as positive voltage
+%Output reads MSB to LSB
+%Output is 4 Row Matrix with:
+%   Row 1 = Ideal bit sequence
+%   Row 2 = Noisy bit sequence
+%   Row 3 = Ideal bit start time
+%   Row 4 = Jittery bit start time
+function adc_out = ADC(xn, clk, vref, vdrop, ADCbits, ~, ~, ~, ~)
+	vmax = vref-vdrop;
+	xnp = xn/vmax;          	%Signal now scaled from [0,1]
+	xnd = xnp*((2^ADCbits)-1);  %Equivalent decimal value based on # bits
+	xnr = round(xnd);       	%Quantization error, round to nearest int
+	xn_b = decimalToBinary(xnr,ADCbits);  %Custom Binary conversion
+	xn_b = flip(xn_b, 2);   	%Flips elements wrt to dim 2(rows)
+	ibit = reshape(xn_b.',1,ADCbits*length(xn)); %Binary array,MSB->LSB
+	nbit = ibit;	%Place holder for noisy bit sequence
+	ti = [0:length(ibit)-1]*clk;   %Ideal start time of bit out
+	tn = ti; %Place holder for jitter inclusive timing
+	adc_out = [ibit;nbit;ti;tn];	
+end
+ function ASCOut = ASCNL(vi, COEFF)      	
+	%5th Order Harmonic Generator
+	vn_secd = COEFF(1,1)*vi.^2;
+	vn_thrd = COEFF(1,2)*vi.^3;
+	vn_frth = COEFF(1,3)*vi.^4;
+	vn_ffth = COEFF(1,4)*vi.^5;	
+	von = vi + vn_secd + vn_thrd + vn_frth + vn_ffth; %Nonlinear Output         
+	ASCOut = von;
+end
+ %Input Matrix:
+%   Row 1 = Ideal Voltage
+%   Row 2 = Noise Voltage
+%   Row 3 = Ideal Time
+%   Row 4 = Noise Time
+function bpf_out = BPF(input,~, Fs, f_low, f_high, ~, ~)
+	ideal = input(1,:);
+	noise = input(2,:);
+ 	%Catch for NaN
+	ideal(isnan(ideal))=0;
+	noise(isnan(noise))=0;
+	videal = customBandpass(ideal,Fs,f_low,f_high);
+	vnoise = customBandpass(noise,Fs,f_low,f_high);
+	bpf_out = [videal; vnoise; input(3,:); input(4,:)];
+end
+ 
+% MATRIX INPUT:
+%   Row 1 = Binary Sequence of 0's & 1's
+% MATRIX OUTPUT:
+%   Row 1 = Ideal Voltage
+%   Row 2 = Noisy Voltage
+%   Row 3 = Ideal Time
+%   Row 4 = Jittery Time
+% PARAMETERS:
+%   bin_seq [bits]= Input Binary Sequence
+%   clk [Hz] = Sampling clock, dictates output rate of DACs
+%   vref [volts] =  Reference voltage
+%   vint [volts] = [volts] Internal voltage drop
+%   nbits [bits] = # of bits used in conversion, sets resolution(step size)
+%   sigma_prc [%] = Standard Deviation of Power Supply Vref Variation as %
+%   of nominal
+  function dac_out = DAC(bin_seq, clk, vref, vdrop, nbits, sigma_prc)
+	%% BIN TO DECIMAL CONVERSION
+	%Generate a Base 2 Binary Value Array; MSB -> LSB
+	n = 0:(nbits-1); 
+	n = flip(n,2);
+	base2 = (2*ones(1,nbits)).^n; 
+	%Calculate Decimal Value of Each Symbol
+	nwords = fix(length(bin_seq)/nbits); %# of words/symbols out of DAC 
+	base2 = repmat(base2,1,nwords); %Repeat Base 2 for each symbol/word
+	dec_seq = bin_seq .* base2; %If bit=1 value remains, if 0 then = 0
+	dec_seq = reshape(dec_seq, [nbits,nwords]); %One word per row
+	dec_seq = dec_seq.';
+	dec_value = sum(dec_seq,2); %Calculate decimal equivalent of each word
+      %% SYMBOL VOLTAGE CALCULATION
+	%Calculate Noisy Vref
+	%Mu = vref, sigma_percent = % of vref as std dev
+	vref_noise = normrnd(vref,sigma_prc*vref,[1,nwords]);  
+  	%Calculate Ideal Symbol Voltage
+	v_ideal = dec_value * (vref-vdrop)/(2^nbits-1);
+	v_ideal = transpose(v_ideal);
+     	%Calculate Noisy Symbol Voltage
+	resolution = (vref_noise-vdrop)/(2^nbits-1);
+	v_noise = dec_value.*resolution.';
+	v_noise = transpose(v_noise);
+      %% SYMBOL TIMING
+	%Calculate Ideal Output Times
+	t_ideal = (1:nwords)*(1/clk);
+ 	%Generate Jitter with mu of 0 & sigma = 1/(12clk) then ideal to ideal
+	%time for jittery pertubations
+	jtr = normrnd(0, 1/(12*clk), [1,length(t_ideal)]);
+	t_jtr = t_ideal + jtr;
+ 	
+	%% OUTPUT MATRIX CREATION
+	dac_out = [v_ideal;v_noise;t_ideal;t_jtr];  
+end
+ %Weakly nonlinear RF Mixer Model
+%Model focuses on multiplicative output without additional filtering and
+%amplification needed.
+%Assumes times are already synchronized between base and carrier
+function mixer_out = IQ_Mixer(base, osc, phase, coeffMatrix, ~)
+	%Base Voltages
+	vbi = base(1,:); 
+	vbn = base(2,:);
+     	%Carrier Cos Voltages
+	if phase == 0
+   	vci = osc(1,:); 
+   	vcn = osc(3,:);
+	elseif phase == 90
+   	vci = osc(2,:); 
+   	vcn = osc(4,:);
+	else
+    	return
+	end
+   t = base(3,:); 
+     	vi = vbi.*vci;	%Ideal input
+	vn = vbn.*vcn;	%Noisy input
+	%Calculates Ideal & Noisy Cos Outputs with full spectrum 	
+	voi = vi;  
+	von = coeffMatrix(1,1)*vn + coeffMatrix(1,2)*vn.^2 + coeffMatrix(1,3)*vn.^3;  	
+	mixer_out = [voi; von; t; t]; 	
+end
+ function lpf_out = LPF(input, Fs, f_high, ~, ~)
+	ideal = input(1,:);
+	noise = input(2,:);
+	videal = customLowpass(ideal,Fs,f_high);
+	vnoise = customLowpass(noise,Fs,f_high);
+	lpf_out = [videal;vnoise;input(3,:);input(4,:)];
+end
+ %Input Form:
+%   input = [2xN]:
+%   	Row 1 = Data
+%   	Row 2 = Times
+ %   eta = (scalar) Learning Rate
+%   epochs = (scalar) Complete Iterations through all training data
+%   inBeta = [B1, B2, B3, B4] Starting Attenuation Weights
+%   inPhases = [P1, P2, P3, P4] Starting Phase Weights
+%Output Form:
+%   outBeta = [B1, B2, B3, B4] Final Attenuation Weights
+%   outPhases = [P1, P2, P3, P4] Final Phase Weights
+%   MSE = [Start, Finish] Mean square error
+% Model's Underpinning Theory
+% Given:	y = Bcos(wt+ theta)
+%         	= Bcos(wt)cos(theta) - Bsin(wt)sin(theta)]
+% I.e., Bi = Amplitude Weight of Branch 'i'
+%   	di = Phase Weight of Branch 'i'
+% Each branch will have one beta and one phase
+function [outBeta, outPhase, MSE, epochs] = MLBGD(Tx,SI,~, eta, batchSize, convergePercent, inBeta, inPhase)   
+	%MSE = zeros(epochs,length(Tx));%Mean Square Error Matrix
+	pdB = zeros(1,4);               	%Beta Partial Derivatives
+	pdP = zeros(1,4);               	%Phase Partial Derivatives
+	hn = imag(hilbert(Tx));   %Hilbert Transformation
+  	%4 Branch SI Model
+	SI_model = inBeta(1)*( (Tx)*cos(inPhase(1))-hn*sin(inPhase(1)) )...
+            	+ inBeta(2)*( (Tx)*cos(inPhase(2))-hn*sin(inPhase(2)) )...
+            	+ inBeta(3)*( (Tx)*cos(inPhase(3))-hn*sin(inPhase(3)) )...
+            	+ inBeta(4)*( (Tx)*cos(inPhase(4))-hn*sin(inPhase(4)) );
+     	nBatches = fix(length(Tx)/batchSize);
+   	%Calculate inital MSE and assign to current & previous
+	initMSE = sum(( SI - SI_model ).^2);
+	curMSE = initMSE;
+	prevMSE = 0;
+	epochs = 0;
+	tempMSE = zeros(1,nBatches);
+	%for e = 1:epochs %e = epoch
+	%Keep looping till less than % of original MSE
+	while( abs(prevMSE-curMSE) > convergePercent*initMSE)  	
+	%inputTx = normrnd(inputTx, 0.1);   %Incorporates Stochasticness in each iteration
+    	for b = 1:nBatches %k = current sample
+        	%Set Partial Derivatives for Gain to 0 at batch start
+        	pdB(1) = 0;
+        	pdB(2) = 0;
+        	pdB(3) = 0;
+        	pdB(4) = 0;
+        	%Set Partial Derivatives for Phase to 0 at batch start
+        	pdP(1) = 0;
+        	pdP(2) = 0;
+        	pdP(3) = 0;
+        	pdP(4) = 0;
+        	for k = 1+(b-1)*batchSize:((b-1)*batchSize)+batchSize
+            	%Partial Derivatives for Attenuations
+            	pdB(1) = pdB(1) + ( SI(1,k) - SI_model(1,k) ) * (  (Tx(1,k))*cos(inPhase(1)) - hn(1,k)*sin(inPhase(1)) );
+            	pdB(2) = pdB(2) + ( SI(1,k) - SI_model(1,k) ) * (  (Tx(1,k))*cos(inPhase(2)) - hn(1,k)*sin(inPhase(2)) );
+            	pdB(3) = pdB(3) + ( SI(1,k) - SI_model(1,k) ) * (  (Tx(1,k))*cos(inPhase(3)) - hn(1,k)*sin(inPhase(3)) );
+            	pdB(4) = pdB(4) + ( SI(1,k) - SI_model(1,k) ) * (  (Tx(1,k))*cos(inPhase(4)) - hn(1,k)*sin(inPhase(4)) );
+            	%Partial Derivatives for Delays
+            	pdP(1) = pdP(1) + ( SI(1,k) - SI_model(1,k) ) * ( - inBeta(1)*(Tx(1,k))*sin(inPhase(1)) - inBeta(1)*hn(1,k)*cos(inPhase(1)) );
+            	pdP(2) = pdP(2) + ( SI(1,k) - SI_model(1,k) ) * ( - inBeta(2)*(Tx(1,k))*sin(inPhase(2)) - inBeta(2)*hn(1,k)*cos(inPhase(2)) );
+            	pdP(3) = pdP(3) + ( SI(1,k) - SI_model(1,k) ) * ( - inBeta(3)*(Tx(1,k))*sin(inPhase(3)) - inBeta(3)*hn(1,k)*cos(inPhase(3)) );
+            	pdP(4) = pdP(4) + ( SI(1,k) - SI_model(1,k) ) * ( - inBeta(4)*(Tx(1,k))*sin(inPhase(4)) - inBeta(4)*hn(1,k)*cos(inPhase(4)) );
+          	end
+        	% Find Average Gain of Mini-batch for weight update
+        	pdB(1) = pdB(1)/batchSize;
+        	pdB(2) = pdB(2)/batchSize;
+        	pdB(3) = pdB(3)/batchSize;
+        	pdB(4) = pdB(4)/batchSize;
+        	% Find Average Phase of Mini-batch for weight update
+        	pdP(1) = pdP(1)/batchSize;
+        	pdP(2) = pdP(2)/batchSize;
+        	pdP(3) = pdP(3)/batchSize;
+        	pdP(4) = pdP(4)/batchSize;
+        	%Update Attenuation Weights
+        	inBeta(1) = inBeta(1) + eta*pdB(1);
+        	inBeta(2) = inBeta(2) + eta*pdB(2);
+        	inBeta(3) = inBeta(3) + eta*pdB(3);
+        	inBeta(4) = inBeta(4) + eta*pdB(4);
+          	%Update Phase Weights
+        	inPhase(1) = inPhase(1) + eta*pdP(1);
+        	inPhase(2) = inPhase(2) + eta*pdP(2);	
+        	inPhase(3) = inPhase(3) + eta*pdP(3);
+        	inPhase(4) = inPhase(4) + eta*pdP(4);
+            	%Update Model From New Weights
+        	SI_model = inBeta(1)*( (Tx)*cos(inPhase(1))-hn*sin(inPhase(1))  )...
+            	+ inBeta(2)*( (Tx)*cos(inPhase(2))-hn*sin(inPhase(2)) )...
+            	+ inBeta(3)*( (Tx)*cos(inPhase(3))-hn*sin(inPhase(3)) )...
+            	+ inBeta(4)*( (Tx)*cos(inPhase(4))-hn*sin(inPhase(4)) );
+        	tempMSE(1,b) = sum(( SI - SI_model ).^2);
+    	end
+    	%Recalculate Model 
+    	SI_model = inBeta(1)*( (Tx)*cos(inPhase(1))-hn*sin(inPhase(1)) )...
+            	+ inBeta(2)*( (Tx)*cos(inPhase(2))-hn*sin(inPhase(2)) )...
+            	+ inBeta(3)*( (Tx)*cos(inPhase(3))-hn*sin(inPhase(3)) )...
+            	+ inBeta(4)*( (Tx)*cos(inPhase(4))-hn*sin(inPhase(4)) );
+    	%Calculate new MSE
+    	prevMSE = curMSE;
+    	curMSE = sum(( SI - SI_model ).^2);
+    	epochs = epochs + 1;	%Track the number of epochs it takes
+	end
+  	outBeta = inBeta;
+	outPhase = inPhase;
+	MSE = [initMSE, curMSE];
+end
+ %Input Form:
+%   input = [2xN]:
+%   	Row 1 = Data
+%   	Row 2 = Times
+%   eta = (scalar) Learning Rate
+%   epochs = (scalar) Complete Iterations through all training data
+%   inBeta = [B1, B2, B3, B4] Starting Attenuation Weights
+%   inPhases = [P1, P2, P3, P4] Starting Phase Weights
+%Output Form:
+%   outBeta = [B1, B2, B3, B4] Final Attenuation Weights
+%   outPhases = [P1, P2, P3, P4] Final Phase Weights
+%   MSE = [Start, Finish] Mean square error
+%
+% Model's Underpinning Theory
+% Given:	y = Bcos(wt+ theta)
+%         	= Bcos(wt)cos(theta) - Bsin(wt)sin(theta)]
+% I.e., Bi = Amplitude Weight of Branch 'i'
+%   	di = Phase Weight of Branch 'i'
+% Each branch will have one beta and one phase
+function [outBeta, outPhase, MSE, epochs] = MLSGD(Tx, SI, ~, eta, convergePercent, inBeta, inPhase)
+   nBranches = length(inBeta); %# of Branches in ASC
+	pdB = zeros(1,nBranches);   %Beta Partial Derivatives
+	pdP = zeros(1,nBranches);   %Phase Partial Derivatives
+     	hn = imag(hilbert(Tx)); 	%Hilbert Transformation
+  	%Branch SI Model
+	model = zeros(nBranches, length(Tx));
+	for b = 1:nBranches
+    	model(b,:) = inBeta(b)*( (Tx)*cos(inPhase(b))-hn*sin(inPhase(b)) );
+	end
+	SI_model = sum(model);
+	%Calculate inital MSE and assign to current & previous
+	initMSE = sum(( SI - SI_model ).^2);
+	curMSE = initMSE;
+	prevMSE = 0;
+	epochs = 0;
+     	%for e = 1:epochs %e = epoch
+	%Keep looping till less than % of original MSE
+	while( abs(prevMSE-curMSE) > convergePercent*initMSE)  	
+     	for k = 1:length(Tx) %k = current sample
+        	%Each branch's partial derivatives
+        	%Update weights, and update model
+        	for b = 1:nBranches
+            	pdB(b) = ( SI(1,k) - SI_model(1,k) ) * (  (Tx(1,k))*cos(inPhase(b)) - hn(1,k)*sin(inPhase(b)) );	
+            	pdP(b) = ( SI(1,k) - SI_model(1,k) ) * ( - inBeta(b)*(Tx(1,k))*sin(inPhase(b)) -  inBeta(b)*hn(1,k)*cos(inPhase(b)) );
+            	inBeta(b) = inBeta(b) + eta*pdB(b);
+            	inPhase(b) = inPhase(b) + eta*pdP(b);
+            	model(b,:) = inBeta(b)*( (Tx)*cos(inPhase(b))- hn*sin(inPhase(b)) );
+        	end
+        	SI_model = sum(model); %Aggregate ASC output
+ 
+    	end
+    	%Recalculate Model 
+    	for b = 1:nBranches
+        	model(b,:) = inBeta(b)*( (Tx)*cos(inPhase(b))- hn*sin(inPhase(b)));
+    	end
+    	SI_model = sum(model);
+    	%Calculate new MSE
+    	prevMSE = curMSE;
+    	curMSE = sum(( SI - SI_model ).^2);
+    	epochs = epochs + 1;	%Track the number of epochs it takes
+	end
+     	outBeta = inBeta;
+	outPhase = inPhase;
+	MSE = [initMSE, curMSE];
+end 
+% OUTPUT MATRIX:
+%   Row 1 = Ideal cos voltages
+%   Row 2 = Ideal sin voltages 
+%   Row 3 = Phase Noise cos voltages
+%   Row 4 = Phase Noise sin voltages
+%   Row 5 = Time
+% PARAMETERS:
+%   fosc = ideal frequency of oscillation
+%   Fs = samples per second to render
+%   ttlTime = total time of oscillations to calculate
+%   Ro = Nominal system resistance
+%   pcar_dBm = Oscillation power in dBm
+%   sigmadBc = Standard deviation for dBc values
+function osc_out = OSCILLATOR(fosc, Fs, ttlTime, Ro, pcar_dBm, sigmadBc)
+ 	time = [0:1/Fs:ttlTime];  %Time array given oscillators timing
+	%% OSCILLATOR PARAMETERS
+	%Adapted From Vectron's (Microsemi) OX-305 % VS-701 Phase Noise Specs
+	dBc = [-70, -100, -125, -145, -160, -169, -170];
+	f_offset = [10, 10^2, 10^3, 10^4, 10^5, 10^6, 10^7];
+	pcar_W = 10^(pcar_dBm/10)*0.001;
+	vcar_pk = sqrt(2*pcar_W*Ro);
+	%% COMPUTATIONALLY SPARING METHOD OF PHASE NOISE CALCULATION
+	% Shown to produce final time series voltage that differs on average by
+	% only 0.5uV
+	f1 = [f_offset(1):f_offset(2)];
+	f2 = [f_offset(2)+1:f_offset(3)];
+	fn = zeros(1, length(f_offset)-3); %One frequency for each section except 1st & 2nd
+	%Calculates median frequency of sections after 2
+	for i = 3:length(f_offset)-1
+    	fn(i-2) = (f_offset(i)+f_offset(i+1))/2;
+	end
+	m = zeros(1, length(f_offset)-1); %One slope for each section
+	b = zeros(1, length(f_offset)-1); %One intercept for each section
+	%Calculate function for each section 
+	for i = 1:length(f_offset)-1
+    	m(i) = ( dBc(i+1)-dBc(i) ) /...
+        	( log10(f_offset(i+1))- log10(f_offset(i)) );
+    	b(i) = dBc(i) - m(i)*log10(f_offset(i));
+	end
+  	%Calculate dBc value for each frequency from straight line approximation
+	%and incorporate randomness
+	dBc1 = m(1)*log10(f1)+b(1);             	%Ideal Straight Line Approx
+	dBc1 = normrnd(dBc1, sigmadBc, [1,length(dBc1)]); 
+	dBc2 = m(2)*log10(f2)+b(2);             	%Ideal Straight Line Approx
+	dBc2 = normrnd(dBc2, sigmadBc, [1,length(dBc2)]); 
+	%dBcAvg takes average integral function of phase noise band between endpts
+	%Includes stochastic-ness using normal distribution of mu = avg(dBc) &
+	%sigma as user set
+	dBcAvg = zeros(1,length(f_offset)-3);
+	for i = 3:length(f_offset)-1
+    	dBcAvg(i-2) = normrnd(...
+        	m(i)/log(10) *...
+        	( f_offset(i+1)*log(f_offset(i+1)) - f_offset(i)*log(f_offset(i)) + f_offset(i) - f_offset(i+1) )...
+        	/( f_offset(i+1)-f_offset(i) )+b(i), sigmadBc, [1,1] );
+	end
+  	%Calculate Watts from dBc
+	pnW1 = pcar_W * 10.^(dBc1/10);
+	pnW2 = pcar_W * 10.^(dBc2/10);
+	pnWn = pcar_W * 10.^(dBcAvg/10);
+	%Calculate Peak Voltage from Watts
+	pnVpk1 = sqrt(2*pnW1*Ro);  	
+	pnVpk2 = sqrt(2*pnW2*Ro);  	
+	pnVpkn = sqrt(2*pnWn*Ro);
+	%Calculate sin(theta) from peak voltage of phase noise
+	pn_sin1 = zeros(length(f1), length(time));
+	pn_sin2 = zeros(length(f2), length(time));
+	pn_sinN = zeros(length(fn), length(time));
+	% For f1 
+	for i = 1:length(f1)
+    	pn_sin1(i,:) = pnVpk1(1,i)*sin(2*pi*f1(1,i).*time);     
+	end
+	% For f2
+	for i = 1:length(f2)
+    	pn_sin2(i,:) = pnVpk2(1,i)*sin(2*pi*f2(1,i).*time);     
+	end
+	% For fn,
+	for i = 3:length(f_offset)-1
+    	bwCoeff = (f_offset(i+1)-f_offset(i)); %Weight each voltage by # samples in
+    	pn_sinN(i-2,:) =  bwCoeff * pnVpkn(1,i-2) * sin(2*pi*fn(1,i-2).*time); 
+	end
+	%Combine all phase noise voltage sinusoids 
+	pn = sum(pn_sin1);
+	pn2 = sum(pn_sin2);
+	pnN = sum(pn_sinN);
+	%Take arccsin of phase noise voltage to find actual theta(t) phase
+	%deviations
+	theta = asin(pn+pn2+pnN);
+	%% OSCILLATION CALCULATIONS
+	% Ideal Oscillations
+	v_cos = vcar_pk * cos(2*pi*fosc.*time);
+	v_sin = vcar_pk * sin(2*pi*fosc.*time);
+	% Phase Noise Inclusive Oscillations
+	vpn_cos = vcar_pk * cos(2*pi*fosc.*time+theta);
+	vpn_sin = vcar_pk * sin(2*pi*fosc.*time+theta);
+	%% OUTPUT MATRIX
+	osc_out = [v_cos;v_sin;vpn_cos;vpn_sin;time];
+end
+%This function computes the nonlinear output of a 5th order polynomial
+%derived by Taylor series expansion through a PN junction.
+%It is a memoryless model with a coefficient matrix BCDE which may be 
+%altered to match specific datasheet specifications.
+%Primary purpose is modeling for Power Amplifiers 
+%Assumes input matrix in the form of:
+%   Row 1 = Ideal voltages (Noise-free)
+%   Row 2 = Noisy voltages
+%   Row 3 = Ideal Timing (Noise-free)
+%   Row 4 = Noisy Timing
+function paOut = PA(in, Av, COEFF, ~) 	
+	%Input Voltages
+	vi = in(1,:);   %Ideal    	
+	vn = in(2,:);   %Noisy
+	%Harmonics
+	vn_secd = COEFF(1,1)*in(2,:).^2;
+	vn_thrd = COEFF(1,2)*in(2,:).^3;
+	vn_frth = COEFF(1,3)*in(2,:).^4;
+	vn_ffth = COEFF(1,4)*in(2,:).^5;
+	voi = Av*vi;   %Ideal Output
+	von = Av*vn + vn_secd + vn_thrd + vn_frth + vn_ffth; %Nonlinear Output 	
+	paOut = [voi;von;in(3,:);in(4,:)];
+end
+function [dBmTx, dBmIMD, SNRTx] = SNRCalc(timeSeries, ~)
+	%Convert To Frequency Domain via FFT
+	timeFreq = fft(timeSeries);
+     	%Extract & Scale Voltage Magnitude SSB
+	voltMag = abs(timeFreq)/length(timeFreq)*2;
+	voltMag(1)=voltMag(1)/2;	%Correct incidental DC doubling 	
+	magdBm = 20*log10(voltMag/0.001);  
+	%Convert to SSB
+	voltMag = voltMag(1:round(length(voltMag)/2,0));
+	magdBm = magdBm(1:round(length(magdBm)/2,0));
+	%Simple power calculation - peak power in dBm
+	dBmTx = max(magdBm);
+	dBmIMD = mean(magdBm(round(length(magdBm)*0.1):round(length(magdBm)*0.9))); % Average excluding edges
+	SNRTx = dBmTx - dBmIMD; % Simple SNR estimate
+end
+%Weakly nonlinear RF Mixer Model
+%Assumes times are already synchronized between base and carrier
+%INPUT FORM:
+%   Row 1 = Ideal voltages (Noise-free)
+%   Row 2 = Noisy voltages
+%   Row 3 = Synchronized Timing
+%   Row 4 = Synchronized Timing
+function mixer_out = RF_Mixer(in1, in2, coeffMatrix, phase, ~)
+	%CURRENTLY IDEAL MIXER WITH B=0 C=0 	
+	%coeffMatrix = [1,0,0];  %Polynomial coefficient Array 	
+	ti = in1(3,:); % in1 % in2 timing's must match for accurate
+	tn = in1(4,:);      	
+	if phase == 0
+    	vi1 = in1(1,:); %Base
+    	vn1 = in1(2,:); %Base Noise
+    	vi2 = in2(1,:); %Osc Cos
+    	vn2 = in2(3,:); %Osc Cos + PN
+	elseif phase == 90
+    	vi1 = in1(1,:); %Base
+    	vn1 = in1(2,:); %Base Noise
+    	vi2 = in2(2,:); %Osc Sin
+    	vn2 = in2(4,:); %Osc Sin + PN 
+	else
+    	vi1 = in1(1,:); %I or Q 
+    	vn1 = in1(2,:); 
+    	vi2 = in2(1,:); %I or Q
+    	vn2 = in2(2,:); 
+	end 
+	vi = vi1 + vi2;	%Ideal input
+	vn = vn1 + vn2;	%Noisy input
+	%Calculates Ideal & Noisy 3rd order nonlinear polynomial outputs	
+	%Always filter after mixing for best SNR
+	voi = vi;  
+	von = coeffMatrix(1,1)*vn + coeffMatrix(1,2)*vn.^2 + coeffMatrix(1,3)*vn.^3;   	
+	mixer_out = [voi; von; ti; tn]; 	
+end
+%In1 is synchronized to in2
+%Base 
+	%Row 1 = signal volt
+	%Row 2 = signal+noise volt
+	%Row 3 = timing
+	%Row 4 = timing + jitter
+%Carrier 
+	%Row1 = Ideal cos volt
+	%Row2 = Ideal sin volt
+	%Row3 = cos+PN
+	%Row4 = sin+PN, Row5 = Time
+function baseout = Synchronizer(basein, carrierin)
+	baseout = zeros(size(basein,1),size(carrierin,2));
+	baseout(3,:) = carrierin(5,:);  %Combined signal assumes time of carrier
+	baseout(4,:) = carrierin(5,:);  %Now ideal and jitter timing are same
+	%For Ideal Times & Voltages
+	j = 1;
+	n = size(basein,2);
+	carriertime = carrierin(5,j);
+	for i = 1:n
+    	basetime = basein(3,i);
+    	while basetime >= carriertime
+        	baseout(1,j) = basein(1,i); %Defining Ideal Voltages
+        	j = j+1;         	
+        	if j <= size(carrierin,2)
+            	carriertime = carrierin(5,j);
+        	else
+            	carriertime = basetime+1; %Ensures carrier > base
+        	end
+    	end
+	end
+	%For Noisy Times & Voltages
+	j = 1;
+	n = size(basein,2);
+	carriertime = carrierin(5,j);
+	for i = 1:n
+    	basetime = basein(4,i);
+    	while basetime >= carriertime
+        	baseout(2,j) = basein(2,i); %Defining Noisy Voltages
+        	j = j+1;         	
+        	if j <= size(carrierin,2)
+            	carriertime = carrierin(5,j);
+        	else
+            	carriertime = basetime+1; %Ensures carrier > base
+        	end
+    	end
+	end
+end
+% ============ UTILITY FUNCTIONS ============
+% Custom decimal to binary conversion (replacement for de2bi)
+function bin = decimalToBinary(decimal, nBits)
+	decimal = decimal(:);
+	bin = zeros(length(decimal), nBits);
+	for i = 1:length(decimal)
+    	temp = decimal(i);
+    	for j = nBits:-1:1
+        	bin(i, j) = mod(temp, 2);
+        	temp = floor(temp / 2);
+    	end
+	end
+end
+% Custom bandpass filter (replacement for bandpass)
+function y = customBandpass(x, Fs, f_low, f_high)
+	% Simple FIR bandpass filter implementation
+	nyquist = Fs/2;
+	Wn = [f_low f_high] / nyquist;
+	n = 100; % Filter order
+	b = fir1(n, Wn, 'bandpass');
+	y = filter(b, 1, x);
+end
+% Custom lowpass filter (replacement for lowpass)
+function y = customLowpass(x, Fs, f_high)
+	% Simple FIR lowpass filter implementation
+	nyquist = Fs/2;
+	Wn = f_high / nyquist;
+	n = 100; % Filter order
+	b = fir1(n, Wn, 'low');
+	y = filter(b, 1, x);
+end
+% Custom AWGN function (replacement for awgn)
+function y = addAWGN(x, snr)
+	% Add AWGN to signal x with specified SNR in dB
+	signal_power = mean(x.^2);
+	noise_power = signal_power / (10^(snr/10));
+	noise = sqrt(noise_power) * randn(size(x));
+	y = x + noise;
+end
+ 
+ 
+

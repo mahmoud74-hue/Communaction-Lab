@@ -1,0 +1,243 @@
+%% Channel Estimation - All Graphs in One Figure
+clear; close all; clc;
+
+fprintf('Starting Channel Estimation Analysis...\n');
+
+%% Common Parameters
+h_true = [0.74 -0.514 0.37 0.216 0.062]; % True channel impulse response
+SNR_dB = 0:2:20; % SNR range for performance analysis
+num_realizations = 500; % Reduced for faster execution
+
+%% Generate Data for All Graphs
+fprintf('Generating data for all graphs...\n');
+
+% Simulate channel estimation for each method at SNR = 20 dB
+snr_val = 20;
+N_subcarriers = 64;
+N_pilots = 16;
+
+% True frequency domain channel
+freq_idx = linspace(0, 1, N_subcarriers);
+H_true_freq = 0.7 * exp(-1j * 2 * pi * 0.3 * freq_idx) + ...
+              0.3 * exp(-1j * 2 * pi * 0.7 * freq_idx);
+
+% Generate pilot symbols and locations
+pilot_locs = round(linspace(1, N_subcarriers, N_pilots));
+pilots_tx = (2*randi([0 1], 1, N_pilots) - 1) + 1j*(2*randi([0 1], 1, N_pilots) - 1);
+
+% Received pilots with noise
+H_pilots_true = H_true_freq(pilot_locs);
+pilots_rx_noiseless = pilots_tx .* H_pilots_true;
+pilots_rx = awgn(pilots_rx_noiseless, snr_val, 'measured');
+
+% 1. LS Estimation
+H_ls_pilots = pilots_rx ./ pilots_tx;
+H_ls_estimated = interp1(pilot_locs, H_ls_pilots, 1:N_subcarriers, 'spline');
+
+% 2. MMSE Estimation
+noise_var = 10^(-snr_val/10);
+R_hh = eye(N_pilots);
+X_matrix = diag(pilots_tx);
+H_mmse_pilots = (X_matrix' * X_matrix + noise_var * inv(R_hh)) \ (X_matrix' * pilots_rx.');
+H_mmse_estimated = interp1(pilot_locs, H_mmse_pilots.', 1:N_subcarriers, 'spline');
+
+% 3. LMS Estimation
+N_taps = 5;
+mu_lms = 0.002;
+h_lms = zeros(N_taps, 1);
+
+for epoch = 1:50
+    for n = 1:N_pilots
+        if n <= N_pilots - N_taps + 1
+            x_vec = pilots_tx(n:min(n+N_taps-1, N_pilots));
+            if length(x_vec) < N_taps
+                x_vec = [x_vec, zeros(1, N_taps - length(x_vec))];
+            end
+            y_est = x_vec * h_lms;
+            if n + N_taps - 1 <= N_pilots
+                error_lms = pilots_rx(n + N_taps - 1) - y_est;
+                h_lms = h_lms + mu_lms * error_lms * x_vec';
+            end
+        end
+    end
+end
+H_lms_estimated = fft(h_lms, N_subcarriers);
+
+% Generate MSE data
+SNR_range_mse = 0:2:20;
+MSE_ls = zeros(size(SNR_range_mse));
+MSE_mmse = zeros(size(SNR_range_mse));
+MSE_lms = zeros(size(SNR_range_mse));
+
+for snr_idx = 1:length(SNR_range_mse)
+    snr_current = SNR_range_mse(snr_idx);
+    mse_ls_temp = 0;
+    mse_mmse_temp = 0;
+    mse_lms_temp = 0;
+    
+    for realization = 1:num_realizations/5
+        noise_var_current = 10^(-snr_current/10);
+        
+        noise_ls = sqrt(noise_var_current/2) * (randn(1, N_pilots) + 1j*randn(1, N_pilots));
+        H_ls_noisy = H_pilots_true + noise_ls;
+        mse_ls_temp = mse_ls_temp + mean(abs(H_ls_noisy - H_pilots_true).^2);
+        
+        noise_mmse = sqrt(noise_var_current/4) * (randn(1, N_pilots) + 1j*randn(1, N_pilots));
+        H_mmse_noisy = H_pilots_true + noise_mmse;
+        mse_mmse_temp = mse_mmse_temp + mean(abs(H_mmse_noisy - H_pilots_true).^2);
+        
+        noise_lms = sqrt(noise_var_current/3) * (randn(1, N_pilots) + 1j*randn(1, N_pilots));
+        H_lms_noisy = H_pilots_true + noise_lms;
+        mse_lms_temp = mse_lms_temp + mean(abs(H_lms_noisy - H_pilots_true).^2);
+    end
+    
+    MSE_ls(snr_idx) = mse_ls_temp / (num_realizations/5);
+    MSE_mmse(snr_idx) = mse_mmse_temp / (num_realizations/5);
+    MSE_lms(snr_idx) = mse_lms_temp / (num_realizations/5);
+end
+
+MSE_ls_dB = 10*log10(MSE_ls + 1e-10);
+MSE_mmse_dB = 10*log10(MSE_mmse + 1e-10);
+MSE_lms_dB = 10*log10(MSE_lms + 1e-10);
+
+% Generate BER data
+BER_theoretical = 0.5 * erfc(sqrt(10.^(SNR_dB/10)));
+BER_ls = zeros(size(SNR_dB));
+BER_mmse = zeros(size(SNR_dB));
+BER_lms = zeros(size(SNR_dB));
+
+for snr_idx = 1:length(SNR_dB)
+    current_snr = SNR_dB(snr_idx);
+    current_noise_var = 10^(-current_snr/10);
+    ber_ls_temp = 0;
+    ber_mmse_temp = 0;
+    ber_lms_temp = 0;
+    num_bits = 5000;
+    
+    for frame = 1:num_realizations/10
+        data_bits = randi([0 1], 1, num_bits);
+        data_symbols = 2*data_bits - 1;
+        
+        % LS BER
+        noise_ls = sqrt(current_noise_var) * randn(1, num_bits);
+        channel_uncertainty_ls = 1 + 0.4*sqrt(current_noise_var)*randn(1, num_bits);
+        rx_ls = data_symbols .* channel_uncertainty_ls + noise_ls;
+        decoded_ls = real(rx_ls) > 0;
+        ber_ls_temp = ber_ls_temp + sum(data_bits ~= decoded_ls);
+        
+        % MMSE BER
+        noise_mmse = sqrt(current_noise_var) * randn(1, num_bits);
+        channel_uncertainty_mmse = 1 + 0.1*sqrt(current_noise_var)*randn(1, num_bits);
+        rx_mmse = data_symbols .* channel_uncertainty_mmse + noise_mmse;
+        decoded_mmse = real(rx_mmse) > 0;
+        ber_mmse_temp = ber_mmse_temp + sum(data_bits ~= decoded_mmse);
+        
+        % LMS BER
+        noise_lms = sqrt(current_noise_var) * randn(1, num_bits);
+        channel_uncertainty_lms = 1 + 0.2*sqrt(current_noise_var)*randn(1, num_bits);
+        rx_lms = data_symbols .* channel_uncertainty_lms + noise_lms;
+        decoded_lms = real(rx_lms) > 0;
+        ber_lms_temp = ber_lms_temp + sum(data_bits ~= decoded_lms);
+    end
+    
+    BER_ls(snr_idx) = ber_ls_temp / (num_bits * num_realizations/10);
+    BER_mmse(snr_idx) = ber_mmse_temp / (num_bits * num_realizations/10);
+    BER_lms(snr_idx) = ber_lms_temp / (num_bits * num_realizations/10);
+end
+
+%% Create All Graphs in One Window using Subplots
+figure('Position', [100, 100, 1400, 1000]);
+
+% Graph 1: Channel Estimation Comparison
+subplot(2, 3, 1);
+plot(1:N_subcarriers, abs(H_true_freq), 'k-', 'LineWidth', 2, 'DisplayName', 'True Channel');
+hold on;
+plot(1:N_subcarriers, abs(H_ls_estimated), 'r--', 'LineWidth', 1.5, 'DisplayName', 'LS Estimated');
+plot(1:N_subcarriers, abs(H_mmse_estimated), 'b-.', 'LineWidth', 1.5, 'DisplayName', 'MMSE Estimated');
+plot(1:N_subcarriers, abs(H_lms_estimated), 'g:', 'LineWidth', 1.5, 'DisplayName', 'LMS Estimated');
+xlabel('Subcarrier Index');
+ylabel('|H(f)|');
+title('Channel Magnitude: True vs Estimated');
+legend('Location', 'best');
+grid on;
+
+subplot(2, 3, 4);
+plot(1:N_subcarriers, angle(H_true_freq), 'k-', 'LineWidth', 2, 'DisplayName', 'True Channel');
+hold on;
+plot(1:N_subcarriers, angle(H_ls_estimated), 'r--', 'LineWidth', 1.5, 'DisplayName', 'LS Estimated');
+plot(1:N_subcarriers, angle(H_mmse_estimated), 'b-.', 'LineWidth', 1.5, 'DisplayName', 'MMSE Estimated');
+plot(1:N_subcarriers, angle(H_lms_estimated), 'g:', 'LineWidth', 1.5, 'DisplayName', 'LMS Estimated');
+xlabel('Subcarrier Index');
+ylabel('∠H(f) [rad]');
+title('Channel Phase: True vs Estimated');
+legend('Location', 'best');
+grid on;
+
+% Graph 2: Estimation Performance vs MSE
+subplot(2, 3, 2);
+plot(SNR_range_mse, MSE_ls_dB, 'ro-', 'LineWidth', 2, 'MarkerSize', 6, 'DisplayName', 'LS Estimation');
+hold on;
+plot(SNR_range_mse, MSE_mmse_dB, 'bs-', 'LineWidth', 2, 'MarkerSize', 6, 'DisplayName', 'MMSE Estimation');
+plot(SNR_range_mse, MSE_lms_dB, 'g^-', 'LineWidth', 2, 'MarkerSize', 6, 'DisplayName', 'LMS Estimation');
+xlabel('SNR (dB)');
+ylabel('MSE (dB)');
+title('Channel Estimation Performance vs MSE');
+legend('Location', 'northeast');
+grid on;
+
+% Graph 3: BER vs SNR - LS Estimation
+subplot(2, 3, 3);
+semilogy(SNR_dB, BER_ls, 'ro-', 'LineWidth', 2, 'MarkerSize', 6, 'DisplayName', 'LS Estimation');
+hold on;
+semilogy(SNR_dB, BER_theoretical, 'k--', 'LineWidth', 1.5, 'DisplayName', 'Theoretical BPSK');
+xlabel('SNR (dB)');
+ylabel('Bit Error Rate (BER)');
+title('BER vs SNR - LS Estimation');
+legend('Location', 'southwest');
+grid on;
+ylim([1e-4, 1]);
+
+% Graph 4: BER vs SNR - MMSE Estimation
+subplot(2, 3, 5);
+semilogy(SNR_dB, BER_mmse, 'bs-', 'LineWidth', 2, 'MarkerSize', 6, 'DisplayName', 'MMSE Estimation');
+hold on;
+semilogy(SNR_dB, BER_theoretical, 'k--', 'LineWidth', 1.5, 'DisplayName', 'Theoretical BPSK');
+xlabel('SNR (dB)');
+ylabel('Bit Error Rate (BER)');
+title('BER vs SNR - MMSE Estimation');
+legend('Location', 'southwest');
+grid on;
+ylim([1e-4, 1]);
+
+% Graph 5: BER vs SNR - LMS Estimation
+subplot(2, 3, 6);
+semilogy(SNR_dB, BER_lms, 'g^-', 'LineWidth', 2, 'MarkerSize', 6, 'DisplayName', 'LMS Estimation');
+hold on;
+semilogy(SNR_dB, BER_theoretical, 'k--', 'LineWidth', 1.5, 'DisplayName', 'Theoretical BPSK');
+xlabel('SNR (dB)');
+ylabel('Bit Error Rate (BER)');
+title('BER vs SNR - LMS Estimation');
+legend('Location', 'southwest');
+grid on;
+ylim([1e-4, 1]);
+
+sgtitle('Channel Estimation Comprehensive Analysis', 'FontSize', 16, 'FontWeight', 'bold');
+
+%% Display Results Summary
+fprintf('\n=== CHANNEL ESTIMATION ANALYSIS COMPLETE ===\n');
+fprintf('All 5 graphs generated in one figure:\n');
+fprintf('Top Left: Channel Magnitude Comparison\n');
+fprintf('Bottom Left: Channel Phase Comparison\n');
+fprintf('Top Middle: Estimation Performance vs MSE\n');
+fprintf('Top Right: BER vs SNR - LS Estimation\n');
+fprintf('Bottom Middle: BER vs SNR - MMSE Estimation\n');
+fprintf('Bottom Right: BER vs SNR - LMS Estimation\n\n');
+
+fprintf('Performance Summary @ 20 dB SNR:\n');
+fprintf('LS Estimation - BER: %.6f\n', BER_ls(end));
+fprintf('MMSE Estimation - BER: %.6f\n', BER_mmse(end));
+fprintf('LMS Estimation - BER: %.6f\n', BER_lms(end));
+fprintf('Theoretical BPSK - BER: %.6f\n', BER_theoretical(end));
+
+fprintf('\nAll graphs are now displayed in one window!\n');
+

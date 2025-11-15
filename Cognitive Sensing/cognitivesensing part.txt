@@ -1,0 +1,72 @@
+rng(7);  
+
+nPUs = 1;       
+nSUs = 15;      
+nSamps = 1e3;     
+nMCEvents = 5e3;     
+nROCPts = 60;      
+FsED = 1;       
+
+snrdB = linspace(-20,-5,nSUs);
+snrLin = db2pow(snrdB);
+sPow_SU = ones(1,nSUs);
+nPow_SU = sPow_SU ./ snrLin;
+
+Rmax = 100; K = 3;
+r = Rmax*rand(1,nSUs);
+theta = 2*pi*rand(1,nSUs);
+sx = r.*cos(theta);
+sy = r.*sin(theta);
+
+positions = [sx(:), sy(:)];
+[idx, C] = kmeans(positions, K, 'Replicates',10, 'MaxIter',1000);
+
+members = cell(K,1);
+for k = 1:K, members{k} = find(idx == k).'; end
+
+Ted_SU = zeros(nMCEvents, nSUs);
+Ted_cluster = zeros(nMCEvents, K);
+Ted_global = zeros(nMCEvents, 1);
+TX = randi([0,1], nMCEvents,1);
+
+for i = 1:nMCEvents
+    X = sqrt(1/nPUs) * complex(randn(nPUs, nSamps), randn(nPUs, nSamps));
+    H = sqrt(1/2) * complex(randn(nSUs, nPUs), randn(nSUs, nPUs));
+    V = (sqrt(nPow_SU/2).').*complex(randn(nSUs, nSamps), randn(nSUs, nSamps));
+    Ysig = sqrt(sPow_SU/2).'.*(H*X);
+    Y = TX(i)*Ysig + V;
+    Ted_SU(i,:) = (1/nSamps)*sum(abs(Y).^2, 2).';
+    for k = 1:K
+        m = members{k};
+        Ted_cluster(i,k) = mean(Ted_SU(i, m));
+    end
+    Ted_global(i,1) = mean(Ted_cluster(i,:));
+end
+
+th = linspace(min(Ted_global), 0.999*max(Ted_global), nROCPts);
+Pfa_g = sum(Ted_global>th & TX==0,1)/max(1,sum(TX==0));
+Pd_g = sum(Ted_global>th & TX==1,1)/max(1,sum(TX==1));
+
+Pfa_c = zeros(K, numel(th));
+Pd_c = zeros(K, numel(th));
+for k = 1:K
+    Pfa_c(k,:) = sum(Ted_cluster(:,k)>th & TX==0,1)/max(1,sum(TX==0));
+    Pd_c(k,:) = sum(Ted_cluster(:,k)>th & TX==1,1)/max(1,sum(TX==1));
+end
+
+figure('Name','K-means Clusters','Color','w');
+gscatter(sx, sy, idx, lines(K));
+hold on; plot(C(:,1), C(:,2), 'kp', 'markersize',12,'markerfacecolor','y');
+xlabel('x (m)'); ylabel('y (m)'); title(sprintf('SUs clustered by K-means (K=%d)',K));
+axis equal; grid on; legend('Location','bestoutside');
+
+figure('Name','ROC Curves','Color','w');
+plot(Pfa_g, Pd_g, 'k*-','LineWidth',1.5); hold on; grid on;
+for k = 1:K, plot(Pfa_c(k,:), Pd_c(k,:), '-','LineWidth',1.5); end
+xlim([0 1]); ylim([0 1]);
+xlabel('P_{FA}'); ylabel('P_d');
+leg = [{'Global (avg clusters)'} arrayfun(@(k) sprintf('Cluster %d',k), 1:K, 'UniformOutput',false)];
+legend(leg, 'Location','SouthEast');
+title('ROC: Global vs. per-cluster (Energy Detector + K-means)');
+
+fprintf('\n==> FINISHED.\n');

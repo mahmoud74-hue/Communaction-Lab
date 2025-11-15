@@ -1,0 +1,216 @@
+frmLen = 100;       % frame length
+numPackets = 1000;  % number of packets
+EbNo = 0:2:20;      % Eb/No varying to 20 dB
+N = 2;              % maximum number of Tx antennas
+M = 2;              % maximum number of Rx antennas
+P = 2;              % modulation order
+ostbcEnc = comm.OSTBCEncoder;
+ostbcComb = comm.OSTBCCombiner;
+SNR = EbNo;   % For BPSK, Eb/No = SNR
+errorCalc1 = comm.ErrorRate;
+errorCalc2 = comm.ErrorRate;
+errorCalc3 = comm.ErrorRate;
+s = rng(55408);
+% Pre-allocate variables for speed
+H = zeros(frmLen, N, M);
+ber_noDiver  = zeros(3,length(EbNo));
+ber_Alamouti = zeros(3,length(EbNo));
+ber_MaxRatio = zeros(3,length(EbNo));
+ber_thy2     = zeros(1,length(EbNo));
+% Set up a figure for visualizing BER results
+fig = figure;
+grid on;
+ax = fig.CurrentAxes;
+hold(ax,'on');
+ax.YScale = 'log';
+xlim(ax,[EbNo(1), EbNo(end)]);
+ylim(ax,[1e-4 1]);
+xlabel(ax,'Eb/No (dB)');
+ylabel(ax,'BER');
+fig.NumberTitle = 'off';
+fig.Name = 'Transmit vs. Receive Diversity';
+title(ax,'Transmit vs. Receive Diversity');
+set(fig, 'DefaultLegendAutoUpdate', 'off');
+fig.Position = figposition([15 50 25 30]);
+% Loop over several EbNo points
+for idx = 1:length(EbNo)
+    reset(errorCalc1);
+    reset(errorCalc2);
+    reset(errorCalc3);
+    % Loop over the number of packets
+    for packetIdx = 1:numPackets
+        data = randi([0 P-1], frmLen, 1);
+        modData = pskmod(data,P);
+       encData = ostbcEnc(modData);
+        H(1:N:end, :, :) = (randn(frmLen/2, N, M) + ...
+            1i*randn(frmLen/2, N, M))/sqrt(2);
+        H(2:N:end, :, :) = H(1:N:end, :, :);
+        H11 = H(:,1,1);
+        H21 = H(:,:,1)/sqrt(2);
+        H12 = squeeze(H(:,1,:));
+        chanOut11 = H11 .* modData;
+        chanOut21 = sum(H21.* encData, 2);
+        chanOut12 = H12 .* repmat(modData, 1, 2);
+        % Add AWGN
+        rxSig11 = awgn(chanOut11,SNR(idx));
+        rxSig21 = awgn(chanOut21,SNR(idx));
+        rxSig12 = awgn(chanOut12,SNR(idx));
+        % Alamouti Space-Time Block Combiner
+        decData = ostbcComb(rxSig21, H21);
+        % ML Detector (minimum Euclidean distance)
+        demod11 = pskdemod(rxSig11.*conj(H11),P);
+        demod21 = pskdemod(decData,P);
+        demod12 = pskdemod(sum(rxSig12.*conj(H12), 2),P);
+        ber_noDiver(:,idx)  = errorCalc1(data, demod11);
+        %   for Alamouti coded 2x1 system
+        ber_Alamouti(:,idx) = errorCalc2(data, demod21);
+        %   for Maximal-ratio combined 1x2 system
+        ber_MaxRatio(:,idx) = errorCalc3(data, demod12);
+    end % end of FOR loop for numPackets
+    ber_thy2(idx) = berfading(EbNo(idx), 'psk', 2, 2);
+    % Plot results
+    semilogy(ax,EbNo(1:idx), ber_noDiver(1,1:idx), 'r*', ...
+        EbNo(1:idx), ber_Alamouti(1,1:idx), 'go', ...
+        EbNo(1:idx), ber_MaxRatio(1,1:idx), 'bs', ...
+        EbNo(1:idx), ber_thy2(1:idx), 'm');
+    legend(ax,'No Diversity (1Tx, 1Rx)', 'Alamouti (2Tx, 1Rx)',...
+        'Maximal-Ratio Combining (1Tx, 2Rx)', ...
+        'Theoretical 2nd-Order Diversity');
+    drawnow;
+end  % end of for loop for EbNo
+% Perform curve fitting and replot the results
+fitBER11 = berfit(EbNo, ber_noDiver(1,:));
+fitBER21 = berfit(EbNo, ber_Alamouti(1,:));
+fitBER12 = berfit(EbNo, ber_MaxRatio(1,:));
+semilogy(ax,EbNo, fitBER11, 'r', EbNo, fitBER21, 'g', EbNo, fitBER12, 'b');
+hold(ax,'off');
+% Restore default stream
+rng(s);
+%%%MIMO_2x2_full
+frmLen = 100;           % frame length
+maxNumErrs = 300;       % maximum number of errors
+maxNumPackets = 3000;   % maximum number of packets
+EbNo = 0:2:12;          % Eb/No varying to 12 dB
+N = 2;                  % number of Tx antennas
+M = 2;                  % number of Rx antennas
+pLen = 8;               % number of pilot symbols per frame
+W = hadamard(pLen);
+pilots = W(:, 1:N);     
+chan = comm.MIMOChannel( ...
+    'MaximumDopplerShift', 0, ...
+    'SpatialCorrelationSpecification', 'None', ...
+    'NumTransmitAntennas', N, ...
+    'NumReceiveAntennas', M, ...
+    'PathGainsOutputPort', true);
+release(ostbcComb);
+ostbcComb.NumReceiveAntennas = M;
+s = rng(55408);
+HEst = zeros(frmLen, N, M);
+ber_Estimate = zeros(3,length(EbNo));
+ber_Known    = zeros(3,length(EbNo));
+% Set up a figure for visualizing BER results
+fig = figure;
+grid on;
+ax = fig.CurrentAxes;
+hold(ax,'on');
+ax.YScale = 'log';
+xlim(ax,[EbNo(1), EbNo(end)]);
+ylim(ax,[1e-4 1]);
+xlabel(ax,'Eb/No (dB)');
+ylabel(ax,'BER');
+fig.NumberTitle = 'off';
+fig.Name = 'Orthogonal Space-Time Block Coding';
+title(ax,'Alamouti-coded 2x2 System');
+set(fig,'DefaultLegendAutoUpdate','off');
+fig.Position = figposition([41 50 25 30]);
+% Loop over several EbNo points
+for idx = 1:length(EbNo)
+    reset(errorCalc1);
+    reset(errorCalc2);
+    while (ber_Estimate(2,idx) < maxNumErrs) && ...
+            (ber_Known(2,idx) < maxNumErrs) && ...
+            (ber_Estimate(3,idx)/frmLen < maxNumPackets)
+        % Generate data vector per frame
+        data = randi([0 P-1], frmLen, 1);
+        % Modulate data
+        modData = pskmod(data,P);
+        % Alamouti Space-Time Block Encoder
+        encData = ostbcEnc(modData);
+        % Prepend pilot symbols for each frame
+        txSig = [pilots; encData];
+        % Pass through the 2x2 channel
+        reset(chan);
+        [chanOut, H] = chan(txSig);
+        % Add AWGN
+        rxSig = awgn(chanOut,SNR(idx));
+    
+        HEst(1,:,:) = pilots(:,:).' * rxSig(1:pLen, :) / pLen;
+        HEst = HEst(ones(frmLen, 1), :, :);
+        decDataEst = ostbcComb(rxSig(pLen+1:end,:), HEst);
+        decDataKnown = ostbcComb(rxSig(pLen+1:end,:), ...
+            squeeze(H(pLen+1:end,:,:,:)));
+        demodEst   = pskdemod(decDataEst,P);      % estimatedchannel
+        demodKnown = pskdemod(decDataKnown,P);    % knownchannel
+        % Calculate and update BER for current EbNo value
+        %   for estimated channel
+        ber_Estimate(:,idx) = errorCalc1(data, demodEst);
+        %   for known channel
+        ber_Known(:,idx)    = errorCalc2(data, demodKnown);
+    end % end of FOR loop for numPackets
+    % Plot results
+    semilogy(ax,EbNo(1:idx), ber_Estimate(1,1:idx), 'ro');
+    semilogy(ax,EbNo(1:idx), ber_Known(1,1:idx), 'g*');
+    legend(ax,['Channel estimated with ' num2str(pLen) ' pilot symbols/frame'],...
+        'Known channel');
+    drawnow;
+end  % end of for loop for EbNo
+% Perform curve fitting and replot the results
+fitBEREst   = berfit(EbNo, ber_Estimate(1,:));
+fitBERKnown = berfit(EbNo, ber_Known(1,:));
+semilogy(ax,EbNo, fitBEREst, 'r', EbNo, fitBERKnown, 'g');
+hold(ax,'off');
+% Restore default stream
+rng(s)
+[licensePCT,~] = license( 'checkout' , 'Distrib_Computing_Toolbox');
+if (licensePCT && ~isempty(ver('parallel')))
+    EbNo = 0:2:20;
+    [ber11, ber14, ber22, ber41] = mimoOSTBCWithPCT(100,4e3,EbNo);
+else
+    load ostbcRes.mat;
+end
+% Set up a figure for visualizing BER results
+fig = figure;
+grid on;
+ax = fig.CurrentAxes;
+hold(ax,'on');
+ax.YScale = 'log';
+xlim(ax,[EbNo(1), EbNo(end)]);
+ylim(ax,[1e-5 1]);
+xlabel(ax,'Eb/No (dB)');
+ylabel(ax,'BER');
+fig.NumberTitle = 'off';
+fig.Name = 'Orthogonal Space-Time Block Coding(2)';
+title(ax,'G4-coded 4x1 System and Other Comparisons');
+set(fig,'DefaultLegendAutoUpdate','off');
+fig.Position = figposition([30 15 25 30]);
+% Theoretical performance of fourth-order diversity for QPSK
+BERthy4 = berfading(EbNo, 'psk', 4, 4);
+% Plot results
+semilogy(ax,EbNo, ber11, 'r*', EbNo, ber41, 'ms', EbNo, ber22, 'c^', ...
+    EbNo, ber14, 'ko', EbNo, BERthy4, 'g');
+legend(ax,'No Diversity (1Tx, 1Rx), BPSK', 'OSTBC (4Tx, 1Rx), QPSK', ...
+    'Alamouti (2Tx, 2Rx), BPSK', ...
+    'Maximal-Ratio Combining (1Tx, 4Rx), BPSK', ...
+    'Theoretical 4th-Order Diversity, QPSK');
+% Perform curve fitting on non-zero BER points
+lenBER11 = length(ber11(ber11~=0));
+lenBER41 = length(ber41(ber41~=0));
+lenBER22 = length(ber22(ber22~=0));
+lenBER14 = length(ber14(ber14~=0));
+fitBER11 = berfit(EbNo(1:lenBER11), ber11(1:lenBER11));
+fitBER41 = berfit(EbNo(1:lenBER41), ber41(1:lenBER41));
+fitBER22 = berfit(EbNo(1:lenBER22), ber22(1:lenBER22));
+fitBER14 = berfit(EbNo(1:lenBER14), ber14(1:lenBER14));
+semilogy(ax,EbNo(1:lenBER11), fitBER11, 'r', EbNo(1:lenBER41), fitBER41, 'm', ...
+    EbNo(1:lenBER22), fitBER22, 'c', EbNo(1:lenBER14), fitBER14, 'k');
+hold(ax,'off')

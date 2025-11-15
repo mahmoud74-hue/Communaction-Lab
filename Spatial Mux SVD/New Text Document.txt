@@ -1,0 +1,231 @@
+ %% spatial_multiplexing_compare.m
+% 2x2 MIMO Spatial Multiplexing — compare ZF-SIC, MMSE-SIC, ML (QPSK)
+% EbNo points 5, 10, 15, 20, 25, 30 dB
+clear; clc; close all;
+% ----- System parameters -----
+N = 2; % Number of transmit antennas
+M = 2; % Number of receive antennas 
+EbNoVec = [5, 10, 15, 20, 25, 30]; % EbNo (dB) points to simulate
+bps = 2; % Bits per symbol (QPSK)
+M_order = 2^bps; % Modulation order (4)
+% ----- Derived parameters -----
+snrIndB = EbNoVec + 10log10(bps); % SNR in dB
+snrLinear = 10.^(0.1snrIndB); % Linear SNR
+% ----- Create error rate calculation objects -----
+zfBERCalc = comm.ErrorRate;
+mmseBERCalc = comm.ErrorRate;
+mlBERCalc = comm.ErrorRate;
+% ----- Precompute all possible transmit vectors for ML -----
+numComb = M_order^N;
+ allBits = de2bi(0numComb-1, bpsN, 'left-msb');
+% Build all possible transmitted symbol vectors
+allTxSig = zeros(N, numComb);
+for c = 1numComb
+ bits = allBits(c,);
+ bitsPerAntenna = reshape(bits, bps, N).';
+ symIdx = bi2de(bitsPerAntenna, 'left-msb');
+ allTxSig(,c) = pskmod(symIdx, M_order, 0);
+end
+% ----- Preallocate BER results -----
+BER_ZF = zeros(length(EbNoVec), 3);
+BER_MMSE = zeros(length(EbNoVec), 3);
+BER_ML = zeros(length(EbNoVec), 3);
+% ----- Plot setup -----
+figure;
+grid on;
+hold on;
+ax = gca;
+ax.YScale = 'log';
+xlim([EbNoVec(1)-1, EbNoVec(end)+1]);
+ylim([1e-6, 1e-1]);
+xlabel('EbNo (dB)');
+ylabel('Bit Error Rate (BER)');
+title('2x2 MIMO Spatial Multiplexing ZF-SIC vs MMSE-SIC vs ML (QPSK)');
+% Set random seed for reproducibility
+rng(0);
+% ----- Simulation loop over EbNo values -----
+for idx = 1length(EbNoVec)
+ fprintf('Simulating EbNo = %d dB...n', EbNoVec(idx));
+ 
+ % Reset error rate calculators
+ reset(zfBERCalc);
+ reset(mmseBERCalc);
+ reset(mlBERCalc);
+ 
+ snr_lin = snrLinear(idx);
+ noiseVar = 1snr_lin;
+ 
+ % Adaptive iterations based on SNR
+ switch EbNoVec(idx)
+ case 5
+ max_iter = 50000;
+ min_errors = 100;
+ case 10
+ max_iter = 100000;
+ min_errors = 50;
+ case 15
+ max_iter = 150000;
+ min_errors = 30;
+ case 20
+ max_iter = 200000;
+ min_errors = 20;
+ case 25
+ max_iter = 250000;
+min_errors = 15;
+ case 30
+ max_iter = 300000;
+ min_errors = 10;
+ end
+ 28
+ iter_count = 0;
+ 
+ while (iter_count  max_iter) && ...
+ ((BER_ZF(idx, 2)  min_errors)  (BER_MMSE(idx, 2)  min_errors)
+ (BER_ML(idx, 2)  min_errors))
+ 
+ iter_count = iter_count + 1;
+ 
+ % ----- Generate transmitted signal -----
+ msgBits = randi([0, 1], [Nbps, 1]);
+ 
+ % Modulate data
+ symIdxPerAntenna = bi2de(reshape(msgBits, bps, []).', 'left-msb');
+ txSig = pskmod(symIdxPerAntenna, M_order, 0);
+ 
+ % ----- Channel -----
+ rayleighChan = (randn(M, N) + 1irandn(M, N))  sqrt(2);
+ noise = sqrt(noiseVar2)  (randn(M, 1) + 1irandn(M, 1));
+ rxSig = rayleighChan  txSig + noise;
+ 
+ % ----- ZF-SIC Receiver -----
+ r = rxSig;
+ H = rayleighChan;
+ estZF = zeros(Nbps, 1);
+ orderVec = 1N;
+ k = N+1;
+ 
+ for n = 1N
+ H_current = H(, [1k-1, k+1end]);
+ orderVec_current = orderVec(1, [1k-1, k+1end]);
+ 
+ G = (H_current'  H_current)  eye(N-n+1);
+ [~, k] = min(diag(G));
+ symNum = orderVec_current(k);
+ 
+ s_est = G(k,)  H_current'  r;
+ decSym = pskdemod(s_est, M_order, 0);
+ decBits = de2bi(decSym, bps, 'left-msb').';
+ estZF(bps  (symNum-1) + (1bps)) = decBits();
+ 
+ if n  N
+ remodSym = pskmod(decSym, M_order, 0);
+ r = r - H_current(, k)  remodSym;
+ end
+ end
+ 
+ % ----- MMSE-SIC Receiver -----
+ r = rxSig;
+ H = rayleighChan;
+ estMMSE = zeros(Nbps, 1);
+ orderVec = 1N;
+ k = N+1;
+ 
+ for n = 1N
+ H_current = H(, [1k-1, k+1end]);
+ orderVec_current = orderVec(1, [1k-1, k+1end]);
+ 
+ G = (H_current'  H_current + ((N-n+1)snr_lin)  eye(N-n+1)) 
+eye(N-n+1);
+ [~, k] = min(diag(G));
+ symNum = orderVec_current(k);
+ 
+ s_est = G(k,)  H_current'  r;
+ decSym = pskdemod(s_est, M_order, 0);
+ decBits = de2bi(decSym, bps, 'left-msb').';
+ estMMSE(bps  (symNum-1) + (1bps)) = decBits();
+ 
+if n  N
+ remodSym = pskmod(decSym, M_order, 0);
+ r = r - H_current(, k)  remodSym;
+ end
+ end
+ 
+ % ----- ML Receiver -----
+ H = rayleighChan;
+ distances = zeros(1, numComb);
+ for c = 1numComb
+ error_vec = rxSig - H  allTxSig(, c);
+ distances(c) = sum(abs(error_vec).^2);
+ end
+ [~, min_idx] = min(distances);
+ estML = allBits(min_idx, )';
+ 
+ % ----- Update BER statistics -----
+ BER_ZF(idx, ) = zfBERCalc(msgBits, estZF);
+ BER_MMSE(idx, ) = mmseBERCalc(msgBits, estMMSE);
+ BER_ML(idx, ) = mlBERCalc(msgBits, estML);
+ 
+ % Progress update
+ if mod(iter_count, 10000) == 0
+ fprintf(' Iteration %d, Errors ZF=%d, MMSE=%d, ML=%dn', ...
+ iter_count, BER_ZF(idx, 2), BER_MMSE(idx, 2),
+BER_ML(idx, 2));
+ end
+ end
+ 
+ fprintf(' Completed after %d iterationsn', iter_count);
+ fprintf(' Final errors ZF=%d, MMSE=%d, ML=%dn', ...
+ BER_ZF(idx, 2), BER_MMSE(idx, 2), BER_ML(idx, 2));
+ 
+ % Update plot progressively
+ if idx  1
+ semilogy(EbNoVec(1idx), BER_ZF(1idx, 1), 'ro-', ...
+ EbNoVec(1idx), BER_MMSE(1idx, 1), 'bs-', ...
+ EbNoVec(1idx), BER_ML(1idx, 1), 'g^-', ...
+ 'LineWidth', 2, 'MarkerSize', 8);
+ else
+ semilogy(EbNoVec(1), BER_ZF(1, 1), 'ro', ...
+ EbNoVec(1), BER_MMSE(1, 1), 'bs', ...
+ EbNoVec(1), BER_ML(1, 1), 'g^', ...
+ 'LineWidth', 2, 'MarkerSize', 8);
+ end
+ 
+ % Use text labels instead of legend to avoid conflicts
+ if idx == length(EbNoVec)
+ text(16, 1e-2, 'ZF-SIC', 'Color', 'red', 'FontSize', 12,
+'FontWeight', 'bold');
+ text(16, 3e-3, 'MMSE-SIC', 'Color', 'blue', 'FontSize', 12,
+'FontWeight', 'bold');
+ text(16, 1e-3, 'ML', 'Color', 'green', 'FontSize', 12, 'FontWeight',
+'bold');
+ end
+ drawnow;
+end
+% ----- Final plot -----
+semilogy(EbNoVec, BER_ZF(, 1), 'r-o', ...
+ EbNoVec, BER_MMSE(, 1), 'b-s', ...
+ EbNoVec, BER_ML(, 1), 'g-^', ...
+ 'LineWidth', 2, 'MarkerSize', 8);
+% Final labels
+text(16, 1e-2, 'ZF-SIC', 'Color', 'red', 'FontSize', 12, 'FontWeight',
+'bold');
+text(16, 3e-3, 'MMSE-SIC', 'Color', 'blue', 'FontSize', 12, 'FontWeight',
+'bold');
+text(16, 1e-3, 'ML', 'Color', 'green', 'FontSize', 12, 'FontWeight',
+'bold');
+grid on;
+xlabel('EbNo (dB)');
+ylabel('Bit Error Rate (BER)');
+title('2x2 MIMO Spatial Multiplexing (QPSK)');
+hold off;
+% Display results in table format
+fprintf('n=== Final Results ===n');
+fprintf('-----------------------------n');
+fprintf('EbNo (dB)  ZF-SIC  MMSE-SIC  MLn');
+fprintf('-----------------------------n');
+for idx = 1length(EbNoVec)
+ fprintf(' %2d  %.2e  %.2e  %.2en', ...
+ EbNoVec(idx), BER_ZF(idx, 1), BER_MMSE(idx, 1), BER_ML(idx, 1));
+end
+fprintf('-----------------------------n');
+fprintf('nSimulation completed successfully!n');

@@ -1,0 +1,125 @@
+clc; clear; close all;
+
+fc = 1e9;
+c = physconst('LightSpeed');
+lambda = c/fc;
+
+array = phased.ULA('NumElements',10,'ElementSpacing',lambda/2);
+array.Element.FrequencyRange = [8e8 1.2e9];
+
+t = linspace(0,0.3,300)';
+testsig = zeros(size(t));
+testsig(201:205) = 1;
+angle_of_arrival = [30;0];
+x = collectPlaneWave(array,testsig,angle_of_arrival,fc);
+
+convbeamformer = phased.PhaseShiftBeamformer('SensorArray',array,...
+    'OperatingFrequency',fc,'Direction',angle_of_arrival,'WeightsOutputPort',true);
+
+rng default
+npower = 0.5;
+x = x + sqrt(npower/2)*(randn(size(x)) + 1i*randn(size(x)));
+
+jamsig = sqrt(10)*randn(300,1);
+jammer_angle = [120;0];
+jamsig = collectPlaneWave(array,jamsig,jammer_angle,fc);
+noisePwr = 1e-5;
+rng(2008);
+noise = sqrt(noisePwr/2)*(randn(size(jamsig)) + 1i*randn(size(jamsig)));
+jamsig = jamsig + noise;
+
+rxsig = x + jamsig;
+
+[yout,w] = convbeamformer(rxsig);
+
+steeringvector = phased.SteeringVector('SensorArray',array,'PropagationSpeed',c);
+LCMVbeamformer = phased.LCMVBeamformer('DesiredResponse',1,...
+    'TrainingInputPort',true,'WeightsOutputPort',true);
+LCMVbeamformer.Constraint = steeringvector(fc,angle_of_arrival);
+[yLCMV,wLCMV] = LCMVbeamformer(rxsig,jamsig);
+
+figure('Name','Beamformer Outputs','NumberTitle','off');
+subplot(2,1,1)
+plot(t,abs(yout),'b','LineWidth',1.2)
+axis tight; grid on
+title('Conventional Beamformer Output')
+ylabel('Magnitude')
+
+subplot(2,1,2)
+plot(t,abs(yLCMV),'b','LineWidth',1.2)
+axis tight; grid on
+title('LCMV (Adaptive) Beamformer Output')
+xlabel('Seconds')
+ylabel('Magnitude')
+
+figure('Name','Beamformer Patterns','NumberTitle','off');
+subplot(2,1,1)
+pattern(array,fc,[-180:180],0,'PropagationSpeed',c,...
+    'CoordinateSystem','rectangular','Type','powerdb','Normalize',true,...
+    'Weights',w)
+title('Array Response with Conventional Beamforming Weights');
+
+subplot(2,1,2)
+pattern(array,fc,[-180:180],0,'PropagationSpeed',c,...
+    'CoordinateSystem','rectangular','Type','powerdb','Normalize',true,...
+    'Weights',wLCMV)
+title('Array Response with LCMV Beamforming Weights');
+
+% ======= 7-Element Phase Shift Beamformer =======
+t2 = (0:1000)';
+fsignal = 0.01;
+x2 = sin(2*pi*fsignal*t2);
+fc2 = 300e6;
+c2 = physconst('LightSpeed');
+incidentAngle2 = [45;0];
+array2 = phased.ULA('NumElements',7);
+x2 = collectPlaneWave(array2,x2,incidentAngle2,fc2,c2);
+noise2 = 0.1*(randn(size(x2)) + 1j*randn(size(x2)));
+rx2 = x2 + noise2;
+
+beamformer2 = phased.PhaseShiftBeamformer('SensorArray',array2,...
+    'OperatingFrequency',fc2,'PropagationSpeed',c2,...
+    'Direction',incidentAngle2,'WeightsOutputPort',true);
+[y2,w2] = beamformer2(rx2);
+
+figure('Name','Phase-Shift Beamformer 7-Element','NumberTitle','off');
+plot(t2,real(rx2(:,4)),'r--','LineWidth',1.2); hold on;
+plot(t2,real(y2),'b','LineWidth',1.4);
+xlabel('Time (sec)')
+ylabel('Amplitude')
+legend('Input (middle element)','Beamformed')
+title('Phase-Shift Beamformer (7 Elements)')
+grid on; hold off;
+
+figure('Name','Pattern 7-Element ULA','NumberTitle','off');
+pattern(array2,fc2,[-180:180],0,'PropagationSpeed',c2,'Type',...
+    'powerdb','CoordinateSystem','polar','Weights',w2)
+title('Array Pattern (7-Element ULA)')
+
+% ======= 5-Element Phase Shift Beamformer =======
+t3 = (0:1000)';
+x3 = sin(2*pi*fsignal*t3);
+array3 = phased.ULA('NumElements',5);
+x3 = collectPlaneWave(array3,x3,incidentAngle2,fc2,c2);
+noise3 = 0.1*(randn(size(x3)) + 1j*randn(size(x3)));
+rx3 = x3 + noise3;
+
+beamformer3 = phased.PhaseShiftBeamformer('SensorArray',array3,...
+    'OperatingFrequency',fc2,'PropagationSpeed',c2,...
+    'DirectionSource','Input port','WeightsOutputPort',true);
+[y3,w3] = beamformer3(rx3,incidentAngle2);
+
+figure('Name','Phase-Shift Beamformer 5-Element Input Port','NumberTitle','off');
+plot(t3,real(rx3(:,3)),'r--','LineWidth',1.2); hold on;
+plot(t3,real(y3),'b','LineWidth',1.4);
+xlabel('Time (sec)')
+ylabel('Amplitude')
+legend('Original (middle element)','Beamformed')
+title('Phase-Shift Beamformer (5 Elements, Input Port)')
+grid on; hold off;
+
+figure('Name','Pattern 5-Element ULA','NumberTitle','off');
+pattern(array3,fc2,[-180:180],0,'PropagationSpeed',c2,...
+    'CoordinateSystem','rectangular','Weights',w3)
+title('Array Pattern (5-Element ULA)')
+

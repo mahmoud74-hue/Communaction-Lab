@@ -1,0 +1,29 @@
+figure;
+hold on; grid on; box on;
+ plot_MRC = plot(nRx, snr_sim_log_MRC, 'b-', 'LineWidth', 2);
+plot_EGC = plot(nRx, snr_sim_log_EGC, 'r--', 'LineWidth', 2);
+plot_SC  = plot(nRx, snr_sim_log_SC,  'g:', 'LineWidth', 2);
+ 
+xlabel('Number of Receiver Antennas', 'FontWeight', 'bold');
+ylabel('SNR (dB)', 'FontWeight', 'bold');
+title('MRC - EGC - SC: SNR Versus No. of Receiver Antennas Plot', ...
+      'FontSize', 12, 'FontWeight', 'bold');
+ legend([plot_MRC(1), plot_EGC(1), plot_SC(1)], ...
+       {'MRC', 'EGC', 'SC'}, 'Location', 'southeast');
+ max_MRC = max(snr_sim_log_MRC(:));
+max_EGC = max(snr_sim_log_EGC(:));
+max_SC  = max(snr_sim_log_SC(:));
+mean_MRC = mean(snr_sim_log_MRC(:));
+mean_EGC = mean(snr_sim_log_EGC(:));
+mean_SC  = mean(snr_sim_log_SC(:));
+comparison_data = {
+    'Technique', 'Max SNR (dB)', 'Mean SNR (dB)';
+    'MRC', max_MRC, mean_MRC;
+    'EGC', max_EGC, mean_EGC;
+    'SC',  max_SC,  mean_SC
+};
+uitable('Data', comparison_data(2:end,:), ...
+        'ColumnName', comparison_data(1,:), ...
+        'Position', [100 40 450 90], ...
+        'ColumnWidth', {120,120,120});
+ hold off;
