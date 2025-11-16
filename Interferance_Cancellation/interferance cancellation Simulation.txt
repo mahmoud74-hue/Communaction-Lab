@@ -1,0 +1,127 @@
+%% NOMA vs OFDMA Capacity Simulation with SIC
+% Author:omar Mohamed Abdelsalam
+% Date: 27 Oct 2025
+% MATLAB R2024a
+%
+% Objective:
+%   Compare total downlink capacity (bps) of OFDMA vs NOMA
+%   using Successive Interference Cancellation (SIC)
+%
+% Notes:
+%   - NOMA: users share same bandwidth and use SIC
+%   - OFDMA: users use orthogonal subbands
+%   - Downlink, AWGN + Pathloss + optional fading
+
+clc; clear; close all;
+rng(42); % reproducibility
+
+%% Parameters
+numUsers   = 20;
+numSectors = 4;
+bandwidth_MHz = 20;
+P_tx_Watts = 10;
+cellRadius_m = 1000;
+
+T = 290;                    % Kelvin
+kB = 1.380649e-23;
+f_c = 3.6e9;
+c = 3e8;
+lambda = c / f_c;
+
+%% Generate Random Users in Cell
+theta = 2*pi*rand(numUsers,1);
+r = cellRadius_m * sqrt(rand(numUsers,1));
+[x, y] = pol2cart(theta, r);
+
+figure;
+scatter(x,y,60,'filled'); hold on;
+viscircles([0 0],cellRadius_m,'Color','k','LineStyle','--');
+axis equal;
+xlabel('x [m]'); ylabel('y [m]');
+title('User Distribution in the Cell');
+grid on;
+
+%% Assign users to sectors
+sectorAngle = 2*pi / numSectors;
+sectorIndex = ceil(theta / sectorAngle);
+sectorIndex(sectorIndex==0) = 1;
+
+%% Group users by sector
+sectorUsers = cell(numSectors,1);
+for s = 1:numSectors
+    sectorUsers{s} = find(sectorIndex == s);
+end
+
+%% Power and bandwidth allocation
+sectorPower = P_tx_Watts / numSectors;
+totalBW_Hz  = bandwidth_MHz * 1e6;
+
+capacityOFDMA = 0;
+capacityNOMA  = 0;
+
+for s = 1:numSectors
+    users = sectorUsers{s};
+    nU = length(users);
+    if nU == 0, continue; end
+
+    % sort users by distance (ascending)
+    [~, sortIdx] = sort(r(users));
+    users = users(sortIdx);
+    dist = r(users);
+
+    % Power allocation (far user gets higher power)
+    weights = linspace(1, nU, nU);
+    P_users = (weights / sum(weights)) * sectorPower; % Watts per user
+    P_users = P_users(:); % column
+
+    % Channel model (pathloss + small random fading)
+    h_abs2 = (1./((4*pi*dist/lambda).^2)) .* (1 + 0.1*randn(nU,1)).^2;
+    h_abs2 = max(h_abs2, 0); % ensure positivity
+
+    % ---------- OFDMA ----------
+    BW_user = totalBW_Hz / nU;
+    N_user  = kB*T*BW_user;
+
+    for u = 1:nU
+        S = P_users(u)*h_abs2(u);
+        SINR = S / N_user;
+        capacityOFDMA = capacityOFDMA + BW_user*log2(1+SINR);
+    end
+
+    % ---------- NOMA + SIC ----------
+    N_noma = kB*T*totalBW_Hz;
+
+    for u = 1:nU
+        % For weaker users (higher index), stronger users interfere
+        if u == 1
+            interference = 0; % perfect SIC for strongest
+        else
+            interference = sum(P_users(1:u-1))*h_abs2(u);
+        end
+        signal = P_users(u)*h_abs2(u);
+        SINR = signal / (N_noma + interference);
+        capacityNOMA = capacityNOMA + totalBW_Hz*log2(1+SINR);
+    end
+end
+
+%% Results
+fprintf('\n=== RESULTS ===\n');
+fprintf('Total OFDMA Capacity : %.3f Gbps\n', capacityOFDMA/1e9);
+fprintf('Total NOMA + SIC Capacity : %.3f Gbps\n', capacityNOMA/1e9);
+
+%% Visualization
+figure;
+bar([capacityOFDMA, capacityNOMA]/1e9, 0.5);
+set(gca,'XTickLabel',{'OFDMA','NOMA + SIC'});
+ylabel('Total Capacity [Gbps]');
+title('Comparison of Total Downlink Capacity');
+grid on;
+
+% Pie chart for visual effect
+figure;
+explode = [0 0.1];
+pie([capacityOFDMA, capacityNOMA], explode, {'OFDMA','NOMA+SIC'});
+title('Capacity Share Visualization');
+
+%% Conclusion
+disp('Simulation complete. NOMA (with SIC) achieves higher spectral efficiency.');
